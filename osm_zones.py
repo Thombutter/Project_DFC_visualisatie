@@ -1,250 +1,333 @@
 """
-osm_zones.py  –  Omgevingstype per GPS-punt via OSM Nominatim
--------------------------------------------------------------
-Koppelt elk meetpunt aan een omgevingstype (park, straat, woonwijk, etc.)
-via reverse geocoding. Gebruikt een rasteraanpak om Nominatim-calls te
-minimaliseren: punten die binnen dezelfde ~25m cel vallen delen één lookup.
+osm_zones.py
+------------
+Classificeert elk GPS-meetpunt naar het type weg waarop het ligt, op
+basis van OpenStreetMap-data (Overpass API).
 
-Gebruik in app.py
------------------
-Stap 1 – import bovenaan:
-    from osm_zones import enrich_with_zones, zone_summary_chart
+Er worden uitsluitend drie categorieen gebruikt:
 
-Stap 2 – na je tijdsfilter (bijv. na knmi = load_knmi_hourly(...)):
-    dff = enrich_with_zones(dff)
+    - "Voetpad"
+    - "Fietspad"
+    - "Hoofdweg"
 
-Stap 3 – voeg een nieuwe sectie toe na je bestaande grafiek:
-    st.subheader("🏙️ Sensorwaarden per omgevingstype")
-    zone_chart = zone_summary_chart(dff, metric_col, metric_label)
-    if zone_chart is not None:
-        st.plotly_chart(zone_chart, use_container_width=True)
+Werkwijze
+=========
+1. Eenmalig worden alle relevante wegen (highways) binnen de bounding box
+   van de route uit OSM opgehaald via de Overpass API.
+2. Voor elk meetpunt wordt de dichtstbijzijnde weg gezocht. De OSM
+   `highway`-tag van die weg wordt naar een van de drie categorieen
+   gemapt.
+3. Ligt er geen bruikbare weg binnen `MAX_SNAP_M` meter, of valt de tag
+   buiten de drie categorieen, dan krijgt het punt de classificatie van
+   het dichtstbijzijnde punt dat WEL een van de drie categorieen heeft
+   (nearest-neighbour fallback).
+
+De resulterende kolom heet ``classificatie``.
+
+Als de Overpass API niet bereikbaar is, valt de module terug op een
+geometrische heuristiek zodat de app blijft werken (de kolom wordt dan
+nog steeds gevuld, met een waarschuwing in de Streamlit-UI).
 """
 
+from __future__ import annotations
+
+import json
+import math
 import time
-from functools import lru_cache
+import urllib.error
+import urllib.request
 
+import numpy as np
 import pandas as pd
-import plotly.express as px
-import requests
-import streamlit as st
+
+try:  # plotly is optioneel voor de samenvattingsgrafiek
+    import plotly.express as px
+except Exception:  # pragma: no cover
+    px = None
+
+try:  # streamlit alleen gebruikt voor nette waarschuwingen
+    import streamlit as st
+except Exception:  # pragma: no cover
+    st = None
+
 
 # --------------------------------------------------------------------------- #
-# Configuratie
+# Categorieen
 # --------------------------------------------------------------------------- #
 
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
-HEADERS = {"User-Agent": "sensordata-route-app/1.0"}
+VOETPAD = "Voetpad"
+FIETSPAD = "Fietspad"
+HOOFDWEG = "Hoofdweg"
 
-# Rastergrootte in graden (~25 m bij Amsterdam's breedtegraad)
-GRID_SIZE = 0.0002
+CATEGORIES = (VOETPAD, FIETSPAD, HOOFDWEG)
 
-# Mapping van OSM-tags naar leesbare omgevingstypes
-CATEGORY_MAP = {
-    # Wegen
-    "motorway": "Snelweg", "trunk": "Snelweg",
-    "primary": "Hoofdweg", "secondary": "Hoofdweg",
-    "tertiary": "Straat", "residential": "Woonstraat",
-    "living_street": "Woonstraat", "service": "Woonstraat",
-    "footway": "Voetpad", "path": "Voetpad",
-    "cycleway": "Fietspad", "pedestrian": "Voetgangerszone",
-    # Natuur & groen
-    "park": "Park", "nature_reserve": "Natuur",
-    "forest": "Bos", "wood": "Bos",
-    "grass": "Groen", "meadow": "Groen",
-    "garden": "Tuin/park",
-    # Bebouwing
-    "retail": "Winkelgebied", "commercial": "Commercieel",
-    "industrial": "Industrieterrein", "construction": "Bouwterrein",
-    "residential": "Woonwijk",
-    # Water
-    "water": "Water", "riverbank": "Water",
-    # Overig
-    "parking": "Parkeerplaats", "school": "School/campus",
-    "university": "School/campus", "hospital": "Ziekenhuis",
-    "station": "Treinstation", "platform": "OV-halte",
+# OSM highway-tag  ->  onze categorie
+HIGHWAY_MAP = {
+    # Voetpad
+    "footway": VOETPAD,
+    "pedestrian": VOETPAD,
+    "path": VOETPAD,
+    "steps": VOETPAD,
+    "living_street": VOETPAD,
+    "track": VOETPAD,
+    "bridleway": VOETPAD,
+    # Fietspad
+    "cycleway": FIETSPAD,
+    # Hoofdweg
+    "motorway": HOOFDWEG,
+    "motorway_link": HOOFDWEG,
+    "trunk": HOOFDWEG,
+    "trunk_link": HOOFDWEG,
+    "primary": HOOFDWEG,
+    "primary_link": HOOFDWEG,
+    "secondary": HOOFDWEG,
+    "secondary_link": HOOFDWEG,
+    "tertiary": HOOFDWEG,
+    "tertiary_link": HOOFDWEG,
+    "unclassified": HOOFDWEG,
+    "residential": HOOFDWEG,
+    "service": HOOFDWEG,
+    "road": HOOFDWEG,
 }
 
-ZONE_COLORS = {
-    "Snelweg":          "#e74c3c",
-    "Hoofdweg":         "#e67e22",
-    "Straat":           "#f39c12",
-    "Woonstraat":       "#f1c40f",
-    "Voetpad":          "#2ecc71",
-    "Fietspad":         "#27ae60",
-    "Voetgangerszone":  "#1abc9c",
-    "Park":             "#16a085",
-    "Natuur":           "#196F3D",
-    "Bos":              "#145A32",
-    "Groen":            "#58D68D",
-    "Tuin/park":        "#82E0AA",
-    "Woonwijk":         "#AED6F1",
-    "Winkelgebied":     "#5DADE2",
-    "Commercieel":      "#2E86C1",
-    "Industrieterrein": "#7F8C8D",
-    "Bouwterrein":      "#BDC3C7",
-    "Water":            "#3498DB",
-    "Parkeerplaats":    "#95A5A6",
-    "School/campus":    "#9B59B6",
-    "Treinstation":     "#8E44AD",
-    "OV-halte":         "#A569BD",
-    "Ziekenhuis":       "#EC407A",
-    "Onbekend":         "#D5D8DC",
-}
+# Een weg telt mee als hij binnen deze afstand (meter) van het punt ligt.
+MAX_SNAP_M = 35.0
 
-# --------------------------------------------------------------------------- #
-# Nominatim lookup (gecached per rastercel)
-# --------------------------------------------------------------------------- #
-
-def _grid_cell(lat: float, lon: float) -> tuple:
-    """Snap coördinaat naar rastercel."""
-    return (round(lat / GRID_SIZE) * GRID_SIZE,
-            round(lon / GRID_SIZE) * GRID_SIZE)
-
-
-@lru_cache(maxsize=2048)
-def _reverse_geocode(lat: float, lon: float) -> str:
-    """Één Nominatim-call voor een rastercel. Resultaat gecached in geheugen."""
-    try:
-        r = requests.get(
-            NOMINATIM_URL,
-            params={
-                "lat": lat,
-                "lon": lon,
-                "format": "jsonv2",
-                "zoom": 17,          # straatniveau
-                "addressdetails": 0,
-            },
-            headers=HEADERS,
-            timeout=8,
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        osm_type = data.get("type", "")
-        osm_cat  = data.get("category", "")
-        name     = data.get("name", "")
-
-        # Probeer het type te mappen
-        for key in [osm_type, osm_cat]:
-            if key in CATEGORY_MAP:
-                return CATEGORY_MAP[key]
-
-        # Fallback op naam-hints
-        name_l = name.lower()
-        if any(w in name_l for w in ["park", "plantsoen", "bos"]):
-            return "Park"
-        if any(w in name_l for w in ["water", "gracht", "kanaal"]):
-            return "Water"
-
-        return "Onbekend"
-
-    except Exception:
-        return "Onbekend"
+OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
 
 
 # --------------------------------------------------------------------------- #
-# Hoofd-functie: verrijk DataFrame met zonetypes
+# Hulpfuncties geometrie
 # --------------------------------------------------------------------------- #
 
-def enrich_with_zones(dff: pd.DataFrame) -> pd.DataFrame:
+
+def _meters_per_degree(lat0: float) -> tuple[float, float]:
+    """Benadering meters per graad rond een referentiebreedtegraad."""
+    m_lat = 111_320.0
+    m_lon = 111_320.0 * math.cos(math.radians(lat0))
+    return m_lat, m_lon
+
+
+def _point_segment_dist_m(px_, py_, ax, ay, bx, by, m_lat, m_lon):
+    """Afstand (m) van punt P tot lijnsegment A-B in lokale meters.
+
+    Coordinaten in graden worden lokaal naar meters geschaald zodat de
+    afstand klopt voor de korte segmenten waar het hier om gaat.
     """
-    Voegt kolom 'zone' toe aan dff via OSM reverse geocoding.
+    pxm, pym = px_ * m_lon, py_ * m_lat
+    axm, aym = ax * m_lon, ay * m_lat
+    bxm, bym = bx * m_lon, by * m_lat
 
-    Toont een Streamlit-voortgangsbalk tijdens het ophalen.
-    Punten binnen dezelfde ~25m rastercel delen één API-call.
+    dx, dy = bxm - axm, bym - aym
+    seg_len2 = dx * dx + dy * dy
+    if seg_len2 <= 1e-12:
+        return math.hypot(pxm - axm, pym - aym)
+
+    t = ((pxm - axm) * dx + (pym - aym) * dy) / seg_len2
+    t = max(0.0, min(1.0, t))
+    cx, cy = axm + t * dx, aym + t * dy
+    return math.hypot(pxm - cx, pym - cy)
+
+
+# --------------------------------------------------------------------------- #
+# OSM ophalen
+# --------------------------------------------------------------------------- #
+
+
+def _fetch_osm_ways(min_lat, min_lon, max_lat, max_lon):
+    """Haal alle relevante highways binnen de bbox op via Overpass.
+
+    Retourneert een lijst van (categorie, [(lat, lon), ...]) of None bij
+    een fout.
     """
-    dff = dff.copy()
+    pad = 0.003  # ~300 m marge zodat wegen aan de rand meedoen
+    bbox = (min_lat - pad, min_lon - pad, max_lat + pad, max_lon + pad)
 
-    # Bepaal unieke rastercellen
-    dff["_cell"] = dff.apply(
-        lambda r: _grid_cell(r["latitude"], r["longitude"]), axis=1
+    wanted = "|".join(sorted(set(HIGHWAY_MAP.keys())))
+    query = (
+        "[out:json][timeout:60];"
+        f'(way["highway"~"^({wanted})$"]'
+        f"({bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}););"
+        "out geom;"
     )
-    unique_cells = dff["_cell"].unique()
-    n = len(unique_cells)
+    import urllib.parse
 
-    # Haal al gecachede cellen op (geen nieuwe call nodig)
-    cached = {c for c in unique_cells if _reverse_geocode.cache_info().currsize > 0
-              and c in _reverse_geocode.__wrapped__.__code__.co_consts}
+    data = "data=" + urllib.parse.quote(query)
 
-    new_cells = [c for c in unique_cells
-                 if c not in getattr(_reverse_geocode, "_seen", set())]
-
-    if not hasattr(_reverse_geocode, "_seen"):
-        _reverse_geocode._seen = set()
-
-    truly_new = [c for c in unique_cells if c not in _reverse_geocode._seen]
-    n_new = len(truly_new)
-
-    if n_new == 0:
-        st.info(f"Alle {n} rastercellen al gecached — geen nieuwe API-calls nodig.")
+    for endpoint in OVERPASS_ENDPOINTS:
+        try:
+            req = urllib.request.Request(
+                endpoint,
+                data=data.encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urllib.request.urlopen(req, timeout=65) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            payload = None
+            time.sleep(1)
+            continue
     else:
-        st.info(
-            f"{n} unieke rastercellen gevonden uit {len(dff)} meetpunten. "
-            f"~{n_new} Nominatim-calls nodig (~{n_new} seconden)."
-        )
-
-    cell_zone: dict[tuple, str] = {}
-    bar = st.progress(0, text="Omgevingstypes ophalen…")
-
-    for i, cell in enumerate(unique_cells):
-        if cell not in cell_zone:
-            cell_zone[cell] = _reverse_geocode(cell[0], cell[1])
-            _reverse_geocode._seen.add(cell)
-            if cell not in getattr(_reverse_geocode, "_seen_slept", set()):
-                time.sleep(1.1)   # Nominatim rate limit: max 1 req/s
-                if not hasattr(_reverse_geocode, "_seen_slept"):
-                    _reverse_geocode._seen_slept = set()
-                _reverse_geocode._seen_slept.add(cell)
-        bar.progress((i + 1) / len(unique_cells),
-                     text=f"Ophalen {i+1}/{len(unique_cells)}…")
-
-    bar.empty()
-    dff["zone"] = dff["_cell"].map(cell_zone)
-    dff = dff.drop(columns=["_cell"])
-    return dff
-
-
-# --------------------------------------------------------------------------- #
-# Samenvattingsgrafiek per omgevingstype
-# --------------------------------------------------------------------------- #
-
-def zone_summary_chart(
-    dff: pd.DataFrame,
-    metric_col: str,
-    metric_label: str,
-):
-    """
-    Geeft een Plotly-staafdiagram terug met gemiddelde meetwaarde per zone.
-    Retourneert None als er geen 'zone'-kolom aanwezig is.
-    """
-    if "zone" not in dff.columns:
         return None
 
-    summary = (
-        dff.groupby("zone")[metric_col]
-        .agg(gemiddelde="mean", n="count")
-        .reset_index()
-        .sort_values("gemiddelde", ascending=True)
+    if payload is None:
+        return None
+
+    ways = []
+    for el in payload.get("elements", []):
+        if el.get("type") != "way":
+            continue
+        hw = el.get("tags", {}).get("highway")
+        cat = HIGHWAY_MAP.get(hw)
+        if cat is None:
+            continue
+        geom = el.get("geometry") or []
+        pts = [(g["lat"], g["lon"]) for g in geom if "lat" in g]
+        if len(pts) >= 2:
+            ways.append((cat, pts))
+    return ways or None
+
+
+# --------------------------------------------------------------------------- #
+# Classificatie
+# --------------------------------------------------------------------------- #
+
+
+def _classify_against_ways(lat, lon, ways, m_lat, m_lon):
+    """Geef (categorie, afstand_m) van de dichtstbijzijnde weg, of (None, inf)."""
+    best_cat, best_d = None, float("inf")
+    for cat, pts in ways:
+        for i in range(len(pts) - 1):
+            ay, ax = pts[i]
+            by, bx = pts[i + 1]
+            d = _point_segment_dist_m(lon, lat, ax, ay, bx, by, m_lat, m_lon)
+            if d < best_d:
+                best_d, best_cat = d, cat
+    return best_cat, best_d
+
+
+def _nearest_known_fallback(lats, lons, classes):
+    """Vul ontbrekende klasses met die van het dichtstbijzijnde bekende punt."""
+    classes = list(classes)
+    known_idx = [i for i, c in enumerate(classes) if c in CATEGORIES]
+    if not known_idx:
+        return classes  # niets bekend -> niets te doen
+
+    klat = np.array([lats[i] for i in known_idx])
+    klon = np.array([lons[i] for i in known_idx])
+    for i, c in enumerate(classes):
+        if c in CATEGORIES:
+            continue
+        d2 = (klat - lats[i]) ** 2 + (klon - lons[i]) ** 2
+        classes[i] = classes[known_idx[int(np.argmin(d2))]]
+    return classes
+
+
+def _geometric_fallback(df: pd.DataFrame) -> pd.Series:
+    """Noodoplossing als OSM onbereikbaar is.
+
+    Zonder wegdata kan het type niet echt bepaald worden. We kennen dan
+    alle punten voorlopig "Hoofdweg" toe (neutrale, meest voorkomende
+    categorie) zodat de app blijft werken.
+    """
+    return pd.Series([HOOFDWEG] * len(df), index=df.index)
+
+
+def enrich_with_zones(df: pd.DataFrame) -> pd.DataFrame:
+    """Voeg een kolom ``classificatie`` toe met Voetpad/Fietspad/Hoofdweg.
+
+    Punten zonder bruikbare weg binnen MAX_SNAP_M krijgen de classificatie
+    van het dichtstbijzijnde punt dat wel geclassificeerd is.
+    """
+    out = df.copy()
+    if out.empty or "latitude" not in out or "longitude" not in out:
+        out["classificatie"] = pd.Series(dtype=object)
+        return out
+
+    lats = out["latitude"].to_numpy(dtype=float)
+    lons = out["longitude"].to_numpy(dtype=float)
+    valid = ~(np.isnan(lats) | np.isnan(lons))
+    if not valid.any():
+        out["classificatie"] = None
+        return out
+
+    lat0 = float(np.nanmean(lats[valid]))
+    m_lat, m_lon = _meters_per_degree(lat0)
+
+    ways = _fetch_osm_ways(
+        float(np.nanmin(lats[valid])),
+        float(np.nanmin(lons[valid])),
+        float(np.nanmax(lats[valid])),
+        float(np.nanmax(lons[valid])),
     )
 
-    colors = [ZONE_COLORS.get(z, "#D5D8DC") for z in summary["zone"]]
+    if ways is None:
+        if st is not None:
+            st.warning(
+                "OSM (Overpass) niet bereikbaar - classificatie gebruikt "
+                "een eenvoudige terugvaloptie. Probeer later opnieuw of "
+                "controleer de netwerkinstellingen."
+            )
+        out["classificatie"] = _geometric_fallback(out).values
+        return out
+
+    raw = []
+    for i in range(len(out)):
+        if not valid[i]:
+            raw.append(None)
+            continue
+        cat, dist = _classify_against_ways(
+            lats[i], lons[i], ways, m_lat, m_lon
+        )
+        raw.append(cat if (cat is not None and dist <= MAX_SNAP_M) else None)
+
+    filled = _nearest_known_fallback(lats, lons, raw)
+    out["classificatie"] = filled
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Samenvattingsgrafiek
+# --------------------------------------------------------------------------- #
+
+
+def zone_summary_chart(df: pd.DataFrame, metric_col: str, metric_label: str):
+    """Gemiddelde meetwaarde per wegtype als staafdiagram (of None)."""
+    if px is None or df.empty or "classificatie" not in df:
+        return None
+    if metric_col not in df:
+        return None
+
+    grp = (
+        df.dropna(subset=["classificatie", metric_col])
+        .groupby("classificatie")[metric_col]
+        .mean()
+        .reindex(CATEGORIES)
+        .dropna()
+        .reset_index()
+    )
+    if grp.empty:
+        return None
 
     fig = px.bar(
-        summary,
-        x="gemiddelde",
-        y="zone",
-        orientation="h",
-        labels={"gemiddelde": f"Gemiddelde {metric_label}", "zone": "Omgevingstype"},
-        text=summary["gemiddelde"].round(1),
-        color="zone",
-        color_discrete_map=ZONE_COLORS,
+        grp,
+        x="classificatie",
+        y=metric_col,
+        labels={"classificatie": "Wegtype", metric_col: metric_label},
+        color="classificatie",
+        color_discrete_map={
+            VOETPAD: "#2ca02c",
+            FIETSPAD: "#1f77b4",
+            HOOFDWEG: "#d62728",
+        },
     )
-    fig.update_traces(textposition="outside")
     fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=320,
         showlegend=False,
-        margin=dict(l=10, r=40, t=10, b=10),
-        height=max(250, len(summary) * 40),
-        xaxis_title=metric_label,
-        yaxis_title="",
     )
     return fig

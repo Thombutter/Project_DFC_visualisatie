@@ -15,7 +15,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from folium.raster_layers import ImageOverlay
-from knmi_reference import load_knmi_hourly, add_knmi_to_chart
+from weather_reference import load_reference_temp, add_reference_to_chart
 from osm_zones import enrich_with_zones, zone_summary_chart
 
 try:
@@ -25,7 +25,7 @@ except ModuleNotFoundError:
 
 st.set_page_config(
     page_title="Sensordata op route",
-    page_icon="🗺️",
+    page_icon=None,
     layout="wide",
 )
 
@@ -210,7 +210,7 @@ def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
 # Sidebar
 # --------------------------------------------------------------------------- #
 
-st.sidebar.title("⚙️ Instellingen")
+st.sidebar.title("Instellingen")
 
 uploaded = st.sidebar.file_uploader(
     "Eigen CSV uploaden (optioneel)", type=["csv", "CSV"]
@@ -281,7 +281,7 @@ else:
 if dff.empty:
     st.warning("Geen data in het gekozen tijdsinterval.")
     st.stop()
-knmi = load_knmi_hourly(date="20260518", station=240)
+reference_temp = load_reference_temp()
 
 # Detecteer automatisch welke kolom de classificatie heeft toegevoegd
 # (werkt ongeacht of die 'zone', 'zone_type', 'omgevingstype' o.i.d. heet).
@@ -301,7 +301,7 @@ if zone_col is None and new_cols:
 # Header & KPI's
 # --------------------------------------------------------------------------- #
 
-st.title("🗺️ Sensordata over de gelopen route")
+st.title("Sensordata over de gelopen route")
 st.caption(
     "GPS-route met OpenStreetMap als ondergrond. De kleuren tonen de "
     + (f"classificatie (omgevingstype: **{zone_col}**)."
@@ -455,7 +455,7 @@ else:
 # --------------------------------------------------------------------------- #
 
 if show_classification and zone_col is not None:
-    st.subheader("🏷️ Classificatie per punt")
+    st.subheader("Classificatie per punt")
 
     counts = (
         dff[zone_col]
@@ -484,7 +484,7 @@ elif show_classification and zone_col is None:
 # Grafiek door de tijd
 # --------------------------------------------------------------------------- #
 
-st.subheader(f"📈 {metric_label} door de tijd")
+st.subheader(f"{metric_label} door de tijd")
 fig = px.line(
     dff,
     x="timestamp",
@@ -494,20 +494,20 @@ fig = px.line(
 fig.update_traces(line_color="#e8590c")
 fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
 
-# KNMI referentielijn toevoegen als temperatuur geselecteerd is
-if metric_col == "tempC" and knmi is not None:
-    fig = add_knmi_to_chart(fig, dff, knmi)
+# Open-Meteo referentielijn toevoegen als temperatuur geselecteerd is
+if metric_col == "tempC" and reference_temp is not None:
+    fig = add_reference_to_chart(fig, dff, reference_temp)
 
 st.plotly_chart(fig, use_container_width=True)
 
-with st.expander("📋 Bekijk ruwe data"):
+with st.expander("Bekijk ruwe data"):
     cols = ["timestamp", "latitude", "longitude",
             "tempC", "co2_ppm", "humidity"]
     if zone_col is not None:
         cols.insert(3, zone_col)
     st.dataframe(dff[cols], use_container_width=True)
 
-st.subheader("🏙️ Sensorwaarden per omgevingstype")
+st.subheader("Sensorwaarden per omgevingstype")
 zone_chart = zone_summary_chart(dff, metric_col, metric_label)
 if zone_chart is not None:
     st.plotly_chart(zone_chart, use_container_width=True)
