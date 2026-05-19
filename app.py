@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from folium.plugins import HeatMap
+from folium.raster_layers import ImageOverlay
 from knmi_reference import load_knmi_hourly, add_knmi_to_chart
 from osm_zones import enrich_with_zones, zone_summary_chart
 
@@ -49,6 +49,84 @@ def nmea_to_decimal(value: pd.Series, hemisphere: pd.Series) -> pd.Series:
     return decimal * sign
 
 
+def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
+    """Inverse-distance-weighted interpolatie naar een regelmatig raster.
+
+    Schat de meetwaarde tussen de meetpunten in. Rastercellen die verder
+    dan `mask_m` meter van het dichtstbijzijnde meetpunt liggen worden
+    gemaskeerd (NaN), zodat de overlay alleen een band langs de gelopen
+    route beslaat en niet de hele bounding box.
+    """
+    lat = np.asarray(lat, dtype=float)
+    lon = np.asarray(lon, dtype=float)
+    values = np.asarray(values, dtype=float)
+
+    ok = ~(np.isnan(lat) | np.isnan(lon) | np.isnan(values))
+    lat, lon, values = lat[ok], lon[ok], values[ok]
+    if len(values) < 3:
+        return None
+
+    # Kleine marge zodat de band rond de route niet wordt afgekapt
+    lat_pad = (lat.max() - lat.min()) * 0.05 or 1e-4
+    lon_pad = (lon.max() - lon.min()) * 0.05 or 1e-4
+    gy = np.linspace(lat.min() - lat_pad, lat.max() + lat_pad, n)
+    gx = np.linspace(lon.min() - lon_pad, lon.max() + lon_pad, n)
+    grid_x, grid_y = np.meshgrid(gx, gy)
+
+    # Vectoriële IDW: afstand van elk rasterpunt tot elk meetpunt
+    flat_y = grid_y.ravel()[:, None]
+    flat_x = grid_x.ravel()[:, None]
+    dist = np.sqrt((flat_y - lat[None, :]) ** 2
+                   + (flat_x - lon[None, :]) ** 2)
+    safe = np.where(dist < 1e-12, 1e-12, dist)
+    weights = 1.0 / safe ** power
+    grid = (weights @ values) / weights.sum(axis=1)
+    grid = grid.reshape(grid_y.shape)
+
+    # Afstand (in meters) tot het dichtstbijzijnde meetpunt per cel
+    import math
+    lat0 = float(lat.mean())
+    m_per_deg_lat = 111_320.0
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat0))
+    dlat_m = (flat_y - lat[None, :]) * m_per_deg_lat
+    dlon_m = (flat_x - lon[None, :]) * m_per_deg_lon
+    nearest_m = np.sqrt(dlat_m ** 2 + dlon_m ** 2).min(axis=1)
+    nearest_m = nearest_m.reshape(grid_y.shape)
+
+    # Maskeer alles buiten de band rond de route
+    grid = np.where(nearest_m <= mask_m, grid, np.nan)
+
+    bounds = [[float(gy.min()), float(gx.min())],
+              [float(gy.max()), float(gx.max())]]
+    return grid, bounds
+
+
+def grid_to_rgba(grid, vmin, vmax):
+    """Zet een waarde-raster om naar een RGBA-afbeelding (blauw→geel→rood).
+
+    Gemaskeerde cellen (NaN) worden volledig transparant, zodat alleen de
+    band langs de route gekleurd is.
+    """
+    masked = np.isnan(grid)
+    if vmax == vmin:
+        norm = np.zeros_like(grid)
+    else:
+        norm = np.clip((np.nan_to_num(grid) - vmin) / (vmax - vmin), 0, 1)
+
+    r = np.where(norm < 0.5, norm / 0.5, 1.0)
+    g = np.where(norm < 0.5, norm / 0.5, 1.0 - (norm - 0.5) / 0.5)
+    b = np.where(norm < 0.5, 1.0 - norm / 0.5, 0.0)
+
+    rgba = np.zeros(grid.shape + (4,), dtype=np.uint8)
+    rgba[..., 0] = (r * 255).astype(np.uint8)
+    rgba[..., 1] = (g * 255).astype(np.uint8)
+    rgba[..., 2] = (b * 255).astype(np.uint8)
+    rgba[..., 3] = 165  # halftransparant zodat de kaart zichtbaar blijft
+    rgba[masked, 3] = 0  # buiten de route-band: volledig transparant
+    # ImageOverlay verwacht rij 0 = noordrand, np-grid heeft rij 0 = zuid
+    return rgba[::-1]
+
+
 @st.cache_data
 def load_data(file_bytes: bytes | None) -> pd.DataFrame:
     data_file = Path(__file__).with_name("DATA.CSV")
@@ -73,6 +151,59 @@ def load_data(file_bytes: bytes | None) -> pd.DataFrame:
             (df["longitude"].between(-180, 180))]
 
     return df.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# Zone-classificatie: caching + persistente opslag op schijf
+# --------------------------------------------------------------------------- #
+
+ZONE_CACHE_FILE = Path(__file__).with_name("zones_cache.parquet")
+
+
+def _zone_cache_key(df: pd.DataFrame) -> str:
+    """Stabiele sleutel op basis van de GPS-coordinaten (op 6 decimalen)."""
+    import hashlib
+
+    coords = (
+        df[["latitude", "longitude"]]
+        .round(6)
+        .to_csv(index=False)
+        .encode("utf-8")
+    )
+    return hashlib.md5(coords).hexdigest()
+
+
+@st.cache_data(show_spinner="Zones classificeren (eenmalig)...")
+def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
+    """Classificeer de zones eenmaal en bewaar het resultaat.
+
+    1. Streamlit-cache: blijft bewaard zolang de server draait, opnieuw
+       runnen van de app triggert geen herberekening.
+    2. Parquet op schijf: overleeft ook een herstart van de server, zodat
+       de (trage) OSM-lookups maar een keer hoeven te gebeuren.
+    De cache_key hangt alleen af van de coordinaten; het tijdsfilter
+    verandert die niet, dus filteren triggert geen herclassificatie.
+    """
+    # Probeer eerst de schijf-cache
+    if ZONE_CACHE_FILE.exists():
+        try:
+            cached = pd.read_parquet(ZONE_CACHE_FILE)
+            if cached["_cache_key"].iloc[0] == cache_key:
+                return cached.drop(columns=["_cache_key"])
+        except Exception:
+            pass  # corrupte/oude cache -> opnieuw berekenen
+
+    enriched = enrich_with_zones(df)
+
+    # Schrijf naar schijf voor volgende keer (best effort)
+    try:
+        to_save = enriched.copy()
+        to_save["_cache_key"] = cache_key
+        to_save.to_parquet(ZONE_CACHE_FILE, index=False)
+    except Exception:
+        pass
+
+    return enriched
 
 
 # --------------------------------------------------------------------------- #
@@ -103,10 +234,36 @@ metric_col = METRICS[metric_label]
 
 view_mode = st.sidebar.radio(
     "Weergave op kaart",
-    ["Gekleurde route-punten", "Heatmap", "Alleen lijn"],
+    ["Gekleurde route-punten", "Heatmap (interpolatie)", "Alleen lijn"],
+)
+
+if view_mode == "Heatmap (interpolatie)":
+    mask_radius_m = st.sidebar.slider(
+        "Breedte interpolatieband (m)",
+        min_value=10,
+        max_value=200,
+        value=50,
+        step=5,
+        help="Alleen binnen deze afstand van de gelopen route wordt de "
+             "geinterpoleerde waarde getoond.",
+    )
+else:
+    mask_radius_m = 50
+
+show_classification = st.sidebar.checkbox(
+    "Toon classificatie per punt",
+    value=False,
+    help="Kleur de routepunten op omgevingstype en toon de classificatie "
+         "in de popup van elk punt, plus een tabel per punt.",
 )
 
 # Tijdsfilter
+# Classificeer de VOLLEDIGE dataset eenmalig (gecached + op schijf).
+# Dit gebeurt voor het tijdsfilter, zodat het verschuiven van de slider
+# of een rerun geen nieuwe (trage) classificatie triggert.
+cols_before = set(df.columns)
+df = classify_zones_cached(df, _zone_cache_key(df))
+
 tmin, tmax = df["timestamp"].min(), df["timestamp"].max()
 if pd.notna(tmin) and pd.notna(tmax) and tmin != tmax:
     tijd_range = st.sidebar.slider(
@@ -125,7 +282,21 @@ if dff.empty:
     st.warning("Geen data in het gekozen tijdsinterval.")
     st.stop()
 knmi = load_knmi_hourly(date="20260518", station=240)
-dff = enrich_with_zones(dff)
+
+# Detecteer automatisch welke kolom de classificatie heeft toegevoegd
+# (werkt ongeacht of die 'zone', 'zone_type', 'omgevingstype' o.i.d. heet).
+new_cols = [c for c in dff.columns if c not in cols_before]
+zone_col = None
+for candidate in ("zone", "zone_type", "zonetype", "omgevingstype",
+                  "classification", "classificatie", "categorie", "category"):
+    if candidate in dff.columns:
+        zone_col = candidate
+        break
+if zone_col is None and new_cols:
+    # val terug op de eerste door enrichment toegevoegde object-kolom
+    obj_new = [c for c in new_cols if dff[c].dtype == object]
+    zone_col = obj_new[0] if obj_new else new_cols[0]
+
 # --------------------------------------------------------------------------- #
 # Header & KPI's
 # --------------------------------------------------------------------------- #
@@ -133,7 +304,9 @@ dff = enrich_with_zones(dff)
 st.title("🗺️ Sensordata over de gelopen route")
 st.caption(
     "GPS-route met OpenStreetMap als ondergrond. De kleuren tonen de "
-    f"gekozen meetwaarde: **{metric_label}**."
+    + (f"classificatie (omgevingstype: **{zone_col}**)."
+       if show_classification and zone_col
+       else f"gekozen meetwaarde: **{metric_label}**.")
 )
 
 c1, c2, c3, c4 = st.columns(4)
@@ -176,27 +349,74 @@ def color_for(value: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+# Vaste, goed onderscheidbare kleurenpalet voor zone-classificatie
+_ZONE_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+]
+zone_color_map: dict = {}
+if zone_col is not None:
+    unique_zones = [z for z in dff[zone_col].dropna().unique()]
+    zone_color_map = {
+        z: _ZONE_PALETTE[i % len(_ZONE_PALETTE)]
+        for i, z in enumerate(sorted(unique_zones, key=str))
+    }
+
+
+def zone_color_for(value) -> str:
+    if pd.isna(value):
+        return "#999999"
+    return zone_color_map.get(value, "#999999")
+
+
+use_zone_colors = show_classification and zone_col is not None
+
 if view_mode == "Gekleurde route-punten":
     for _, row in dff.iterrows():
+        if use_zone_colors:
+            point_color = zone_color_for(row[zone_col])
+        else:
+            point_color = color_for(row[metric_col])
+
+        popup_html = f"<b>{row['timestamp']}</b><br>"
+        if zone_col is not None:
+            popup_html += f"Classificatie: <b>{row[zone_col]}</b><br>"
+        popup_html += (
+            f"Temp: {row['tempC']} °C<br>"
+            f"CO₂: {row['co2_ppm']} ppm<br>"
+            f"Vocht: {row['humidity']} %"
+        )
+
         folium.CircleMarker(
             location=[row["latitude"], row["longitude"]],
             radius=5,
-            color=color_for(row[metric_col]),
+            color=point_color,
             fill=True,
-            fill_color=color_for(row[metric_col]),
+            fill_color=point_color,
             fill_opacity=0.85,
-            popup=folium.Popup(
-                f"<b>{row['timestamp']}</b><br>"
-                f"Temp: {row['tempC']} °C<br>"
-                f"CO₂: {row['co2_ppm']} ppm<br>"
-                f"Vocht: {row['humidity']} %",
-                max_width=220,
-            ),
+            popup=folium.Popup(popup_html, max_width=240),
         ).add_to(fmap)
 
-elif view_mode == "Heatmap":
-    heat = dff[["latitude", "longitude", metric_col]].dropna().values.tolist()
-    HeatMap(heat, radius=14, blur=10, min_opacity=0.3).add_to(fmap)
+elif view_mode == "Heatmap (interpolatie)":
+    interp = idw_grid(
+        dff["latitude"].values,
+        dff["longitude"].values,
+        dff[metric_col].values,
+        mask_m=mask_radius_m,
+    )
+    if interp is not None:
+        grid, bounds = interp
+        rgba = grid_to_rgba(grid, vmin, vmax)
+        ImageOverlay(
+            image=rgba,
+            bounds=bounds,
+            opacity=0.65,
+            interactive=False,
+            cross_origin=False,
+            name=f"Interpolatie {metric_label}",
+        ).add_to(fmap)
+    else:
+        st.warning("Te weinig punten voor interpolatie.")
 
 # Start- en eindmarker
 folium.Marker(
@@ -212,13 +432,53 @@ else:
     st.components.v1.html(fmap._repr_html_(), height=560)
 
 # Legenda
-st.markdown(
-    f"**Legenda — {metric_label}:** "
-    f"<span style='color:#3388ff'>● {vmin:.1f} (laag)</span> &nbsp; "
-    f"<span style='color:#ffff00;background:#444;padding:0 4px'>● midden</span> &nbsp; "
-    f"<span style='color:#ff0000'>● {vmax:.1f} (hoog)</span>",
-    unsafe_allow_html=True,
-)
+if use_zone_colors:
+    legend_items = " &nbsp; ".join(
+        f"<span style='color:{c}'>● {z}</span>"
+        for z, c in zone_color_map.items()
+    )
+    st.markdown(
+        f"**Legenda — classificatie ({zone_col}):** {legend_items}",
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        f"**Legenda — {metric_label}:** "
+        f"<span style='color:#3388ff'>● {vmin:.1f} (laag)</span> &nbsp; "
+        f"<span style='color:#ffff00;background:#444;padding:0 4px'>● midden</span> &nbsp; "
+        f"<span style='color:#ff0000'>● {vmax:.1f} (hoog)</span>",
+        unsafe_allow_html=True,
+    )
+
+# --------------------------------------------------------------------------- #
+# Classificatie per punt (tabel) -- alleen tonen als de optie aanstaat
+# --------------------------------------------------------------------------- #
+
+if show_classification and zone_col is not None:
+    st.subheader("🏷️ Classificatie per punt")
+
+    counts = (
+        dff[zone_col]
+        .value_counts(dropna=False)
+        .rename_axis("Classificatie")
+        .reset_index(name="Aantal punten")
+    )
+    counts["Aandeel"] = (
+        counts["Aantal punten"] / counts["Aantal punten"].sum() * 100
+    ).round(1).astype(str) + " %"
+    st.dataframe(counts, use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        dff[["timestamp", "latitude", "longitude", zone_col,
+             "tempC", "co2_ppm", "humidity"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+elif show_classification and zone_col is None:
+    st.info(
+        "Er is geen classificatiekolom gevonden in de data. "
+        "Controleer of `enrich_with_zones` een zone-kolom toevoegt."
+    )
 
 # --------------------------------------------------------------------------- #
 # Grafiek door de tijd
@@ -241,19 +501,12 @@ if metric_col == "tempC" and knmi is not None:
 st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("📋 Bekijk ruwe data"):
-    st.dataframe(
-        dff[
-            [
-                "timestamp",
-                "latitude",
-                "longitude",
-                "tempC",
-                "co2_ppm",
-                "humidity",
-            ]
-        ],
-        use_container_width=True,
-    )
+    cols = ["timestamp", "latitude", "longitude",
+            "tempC", "co2_ppm", "humidity"]
+    if zone_col is not None:
+        cols.insert(3, zone_col)
+    st.dataframe(dff[cols], use_container_width=True)
+
 st.subheader("🏙️ Sensorwaarden per omgevingstype")
 zone_chart = zone_summary_chart(dff, metric_col, metric_label)
 if zone_chart is not None:
