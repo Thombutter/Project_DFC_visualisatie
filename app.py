@@ -30,20 +30,22 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------------- #
-# Data laden & opschonen
+# Tijdscorrectie per meetloop
 # --------------------------------------------------------------------------- #
+
 WERKELIJKE_START = {
     1: pd.Timestamp("2026-05-18 12:00:00"),
     2: pd.Timestamp("2026-05-27 12:00:00"),
     3: pd.Timestamp("2026-05-28 13:30:00"),
 }
 
-def nmea_to_decimal(value: pd.Series, hemisphere: pd.Series) -> pd.Series:
-    """Zet NMEA DDMM.MMMM / DDDMM.MMMM om naar decimale graden.
+# --------------------------------------------------------------------------- #
+# Data laden & opschonen
+# --------------------------------------------------------------------------- #
 
-    De graden zijn alle cijfers behalve de laatste twee voor de punt;
-    de rest (minuten) wordt gedeeld door 60. Zuid/West worden negatief.
-    """
+
+def nmea_to_decimal(value: pd.Series, hemisphere: pd.Series) -> pd.Series:
+    """Zet NMEA DDMM.MMMM / DDDMM.MMMM om naar decimale graden."""
     v = pd.to_numeric(value, errors="coerce")
     degrees = np.floor(v / 100.0)
     minutes = v - degrees * 100.0
@@ -54,13 +56,6 @@ def nmea_to_decimal(value: pd.Series, hemisphere: pd.Series) -> pd.Series:
 
 
 def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
-    """Inverse-distance-weighted interpolatie naar een regelmatig raster.
-
-    Schat de meetwaarde tussen de meetpunten in. Rastercellen die verder
-    dan `mask_m` meter van het dichtstbijzijnde meetpunt liggen worden
-    gemaskeerd (NaN), zodat de overlay alleen een band langs de gelopen
-    route beslaat en niet de hele bounding box.
-    """
     lat = np.asarray(lat, dtype=float)
     lon = np.asarray(lon, dtype=float)
     values = np.asarray(values, dtype=float)
@@ -70,14 +65,12 @@ def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
     if len(values) < 3:
         return None
 
-    # Kleine marge zodat de band rond de route niet wordt afgekapt
     lat_pad = (lat.max() - lat.min()) * 0.05 or 1e-4
     lon_pad = (lon.max() - lon.min()) * 0.05 or 1e-4
     gy = np.linspace(lat.min() - lat_pad, lat.max() + lat_pad, n)
     gx = np.linspace(lon.min() - lon_pad, lon.max() + lon_pad, n)
     grid_x, grid_y = np.meshgrid(gx, gy)
 
-    # Vectoriële IDW: afstand van elk rasterpunt tot elk meetpunt
     flat_y = grid_y.ravel()[:, None]
     flat_x = grid_x.ravel()[:, None]
     dist = np.sqrt((flat_y - lat[None, :]) ** 2
@@ -87,7 +80,6 @@ def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
     grid = (weights @ values) / weights.sum(axis=1)
     grid = grid.reshape(grid_y.shape)
 
-    # Afstand (in meters) tot het dichtstbijzijnde meetpunt per cel
     import math
     lat0 = float(lat.mean())
     m_per_deg_lat = 111_320.0
@@ -97,7 +89,6 @@ def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
     nearest_m = np.sqrt(dlat_m ** 2 + dlon_m ** 2).min(axis=1)
     nearest_m = nearest_m.reshape(grid_y.shape)
 
-    # Maskeer alles buiten de band rond de route
     grid = np.where(nearest_m <= mask_m, grid, np.nan)
 
     bounds = [[float(gy.min()), float(gx.min())],
@@ -106,11 +97,6 @@ def idw_grid(lat, lon, values, n=160, power=2.0, mask_m=50.0):
 
 
 def grid_to_rgba(grid, vmin, vmax):
-    """Zet een waarde-raster om naar een RGBA-afbeelding (blauw→geel→rood).
-
-    Gemaskeerde cellen (NaN) worden volledig transparant, zodat alleen de
-    band langs de route gekleurd is.
-    """
     masked = np.isnan(grid)
     if vmax == vmin:
         norm = np.zeros_like(grid)
@@ -125,11 +111,9 @@ def grid_to_rgba(grid, vmin, vmax):
     rgba[..., 0] = (r * 255).astype(np.uint8)
     rgba[..., 1] = (g * 255).astype(np.uint8)
     rgba[..., 2] = (b * 255).astype(np.uint8)
-    rgba[..., 3] = 165  # halftransparant zodat de kaart zichtbaar blijft
-    rgba[masked, 3] = 0  # buiten de route-band: volledig transparant
-    # ImageOverlay verwacht rij 0 = noordrand, np-grid heeft rij 0 = zuid
+    rgba[..., 3] = 165
+    rgba[masked, 3] = 0
     return rgba[::-1]
-
 
 
 @st.cache_data
@@ -196,9 +180,7 @@ ZONE_CACHE_FILE = Path(__file__).with_name("zones_cache.parquet")
 
 
 def _zone_cache_key(df: pd.DataFrame) -> str:
-    """Stabiele sleutel op basis van de GPS-coordinaten (op 6 decimalen)."""
     import hashlib
-
     coords = (
         df[["latitude", "longitude"]]
         .round(6)
@@ -210,27 +192,16 @@ def _zone_cache_key(df: pd.DataFrame) -> str:
 
 @st.cache_data(show_spinner="Zones classificeren (eenmalig)...")
 def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
-    """Classificeer de zones eenmaal en bewaar het resultaat.
-
-    1. Streamlit-cache: blijft bewaard zolang de server draait, opnieuw
-       runnen van de app triggert geen herberekening.
-    2. Parquet op schijf: overleeft ook een herstart van de server, zodat
-       de (trage) OSM-lookups maar een keer hoeven te gebeuren.
-    De cache_key hangt alleen af van de coordinaten; het tijdsfilter
-    verandert die niet, dus filteren triggert geen herclassificatie.
-    """
-    # Probeer eerst de schijf-cache
     if ZONE_CACHE_FILE.exists():
         try:
             cached = pd.read_parquet(ZONE_CACHE_FILE)
             if cached["_cache_key"].iloc[0] == cache_key:
                 return cached.drop(columns=["_cache_key"])
         except Exception:
-            pass  # corrupte/oude cache -> opnieuw berekenen
+            pass
 
     enriched = enrich_with_zones(df)
 
-    # Schrijf naar schijf voor volgende keer (best effort)
     try:
         to_save = enriched.copy()
         to_save["_cache_key"] = cache_key
@@ -292,43 +263,24 @@ show_classification = st.sidebar.checkbox(
          "in de popup van elk punt, plus een tabel per punt.",
 )
 
-# Tijdsfilter
-# Classificeer de VOLLEDIGE dataset eenmalig (gecached + op schijf).
-# Dit gebeurt voor het tijdsfilter, zodat het verschuiven van de slider
-# of een rerun geen nieuwe (trage) classificatie triggert.
+# ------------------------------------------------------------------ #
+# Dropdown voor meetlopen — vervangt de tijdsfilter/multiselect
+# ------------------------------------------------------------------ #
 cols_before = set(df.columns)
 df = classify_zones_cached(df, _zone_cache_key(df))
 
-tmin, tmax = df["timestamp"].min(), df["timestamp"].max()
-if pd.notna(tmin) and pd.notna(tmax):
-    df["meetdag"] = df["timestamp"].dt.normalize()
-    beschikbare_dagen = sorted(df["meetdag"].dropna().unique())
+meetlopen = sorted(df["meting"].unique())
+gekozen_meting = st.sidebar.selectbox("Meetloop", meetlopen)
 
-    if beschikbare_dagen:
-        geselecteerde_dagen = st.sidebar.multiselect(
-            "Meetdag(en)",
-            options=beschikbare_dagen,
-            default=beschikbare_dagen,
-            format_func=lambda d: d.strftime("%d-%m-%Y"),
-        )
-
-        if geselecteerde_dagen:
-            mask = df["meetdag"].isin(geselecteerde_dagen)
-            dff = df.loc[mask].reset_index(drop=True)
-        else:
-            dff = df.iloc[0:0].copy()
-    else:
-        dff = df.copy()
-else:
-    dff = df.copy()
+dff = df[df["meting"] == gekozen_meting].reset_index(drop=True)
 
 if dff.empty:
-    st.warning("Geen data in het gekozen tijdsinterval.")
+    st.warning("Geen data voor de gekozen meetloop.")
     st.stop()
+
 reference_temp = load_reference_temp()
 
-# Detecteer automatisch welke kolom de classificatie heeft toegevoegd
-# (werkt ongeacht of die 'zone', 'zone_type', 'omgevingstype' o.i.d. heet).
+# Zone-kolom detecteren
 new_cols = [c for c in dff.columns if c not in cols_before]
 zone_col = None
 for candidate in ("zone", "zone_type", "zonetype", "omgevingstype",
@@ -337,7 +289,6 @@ for candidate in ("zone", "zone_type", "zonetype", "omgevingstype",
         zone_col = candidate
         break
 if zone_col is None and new_cols:
-    # val terug op de eerste door enrichment toegevoegde object-kolom
     obj_new = [c for c in new_cols if dff[c].dtype == object]
     zone_col = obj_new[0] if obj_new else new_cols[0]
 
@@ -366,7 +317,6 @@ c4.metric("Maximum", f"{dff[metric_col].max():.1f}")
 center = [dff["latitude"].mean(), dff["longitude"].mean()]
 fmap = folium.Map(location=center, zoom_start=15, tiles="OpenStreetMap")
 
-# Route als lijn
 coords = dff[["latitude", "longitude"]].values.tolist()
 folium.PolyLine(
     coords, color="#3388ff", weight=3, opacity=0.6, tooltip="Gelopen route"
@@ -376,24 +326,20 @@ vmin, vmax = float(dff[metric_col].min()), float(dff[metric_col].max())
 
 
 def color_for(value: float) -> str:
-    """Kleurschaal van blauw (laag) via geel naar rood (hoog)."""
     if vmax == vmin or pd.isna(value):
         return "#3388ff"
     t = (value - vmin) / (vmax - vmin)
     if t < 0.5:
-        # blauw -> geel
         r = int(255 * (t / 0.5))
         g = int(255 * (t / 0.5))
         b = int(255 * (1 - t / 0.5))
     else:
-        # geel -> rood
         r = 255
         g = int(255 * (1 - (t - 0.5) / 0.5))
         b = 0
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-# Vaste, goed onderscheidbare kleurenpalet voor zone-classificatie
 _ZONE_PALETTE = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -462,7 +408,6 @@ elif view_mode == "Heatmap (interpolatie)":
     else:
         st.warning("Te weinig punten voor interpolatie.")
 
-# Start- en eindmarker
 folium.Marker(
     coords[0], tooltip="Start", icon=folium.Icon(color="green", icon="play")
 ).add_to(fmap)
@@ -475,7 +420,6 @@ if st_folium is not None:
 else:
     st.components.v1.html(fmap._repr_html_(), height=560)
 
-# Legenda
 if use_zone_colors:
     legend_items = " &nbsp; ".join(
         f"<span style='color:{c}'>● {z}</span>"
@@ -495,7 +439,7 @@ else:
     )
 
 # --------------------------------------------------------------------------- #
-# Classificatie per punt (tabel) -- alleen tonen als de optie aanstaat
+# Classificatie per punt
 # --------------------------------------------------------------------------- #
 
 if show_classification and zone_col is not None:
@@ -538,7 +482,6 @@ fig = px.line(
 fig.update_traces(line_color="#e8590c")
 fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
 
-# Open-Meteo referentielijn toevoegen als temperatuur geselecteerd is
 if metric_col == "tempC" and reference_temp is not None:
     fig = add_reference_to_chart(fig, dff, reference_temp)
 
