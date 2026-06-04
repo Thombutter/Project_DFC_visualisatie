@@ -265,16 +265,25 @@ cols_before = set(df.columns)
 df = classify_zones_cached(df, _zone_cache_key(df))
 
 tmin, tmax = df["timestamp"].min(), df["timestamp"].max()
-if pd.notna(tmin) and pd.notna(tmax) and tmin != tmax:
-    tijd_range = st.sidebar.slider(
-        "Tijdsfilter",
-        min_value=tmin.to_pydatetime(),
-        max_value=tmax.to_pydatetime(),
-        value=(tmin.to_pydatetime(), tmax.to_pydatetime()),
-    )
-    mask = (df["timestamp"] >= tijd_range[0]) & (
-        df["timestamp"] <= tijd_range[1])
-    dff = df.loc[mask].reset_index(drop=True)
+if pd.notna(tmin) and pd.notna(tmax):
+    df["meetdag"] = df["timestamp"].dt.normalize()
+    beschikbare_dagen = sorted(df["meetdag"].dropna().unique())
+
+    if beschikbare_dagen:
+        geselecteerde_dagen = st.sidebar.multiselect(
+            "Meetdag(en)",
+            options=beschikbare_dagen,
+            default=beschikbare_dagen,
+            format_func=lambda d: d.strftime("%d-%m-%Y"),
+        )
+
+        if geselecteerde_dagen:
+            mask = df["meetdag"].isin(geselecteerde_dagen)
+            dff = df.loc[mask].reset_index(drop=True)
+        else:
+            dff = df.iloc[0:0].copy()
+    else:
+        dff = df.copy()
 else:
     dff = df.copy()
 
