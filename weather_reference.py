@@ -25,7 +25,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
 
     start = min(dates) + "01"
     end   = max(dates) + "24"
-    
 
     try:
         response = requests.post(
@@ -47,16 +46,15 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
     try:
         lines = response.text.splitlines()
 
-        # Zoek de headerregel (begint met "# STN" of "STN")
+        # Zoek de headerregel die YYYYMMDD bevat (niet de stationsinfo-regel)
         header_idx = None
         for i, line in enumerate(lines):
-            stripped = line.lstrip("#").strip()
-            if stripped.upper().startswith("STN"):
+            if "YYYYMMDD" in line.upper():
                 header_idx = i
                 break
 
         if header_idx is None:
-            # Geen header — gebruik vaste kolomnamen op basis van kolomvolgorde
+            # Geen header — gebruik vaste kolomvolgorde (STN, datum, uur, T)
             data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
             df = pd.read_csv(
                 io.StringIO("\n".join(data_lines)),
@@ -65,7 +63,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 skipinitialspace=True,
             )
         else:
-            # Header gevonden — lees met die header
             header_line = lines[header_idx].lstrip("#").strip()
             data_lines = [
                 l for l in lines[header_idx + 1:]
@@ -75,22 +72,24 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 io.StringIO(header_line + "\n" + "\n".join(data_lines)),
                 skipinitialspace=True,
             )
+            # Kolomnamen opschonen en hernoemen
             df.columns = df.columns.str.strip().str.lstrip("#").str.strip()
-            for col in list(df.columns):
-                c = col.strip().upper()
+            rename = {}
+            for col in df.columns:
+                c = col.upper()
                 if "YYYYMMDD" in c:
-                    df = df.rename(columns={col: "datum"})
+                    rename[col] = "datum"
                 elif c == "HH":
-                    df = df.rename(columns={col: "uur"})
+                    rename[col] = "uur"
                 elif c == "T":
-                    df = df.rename(columns={col: "T_raw"})
-            st.write("kolommen na rename:", df.columns.tolist())
+                    rename[col] = "T_raw"
+            df = df.rename(columns=rename)
 
         df["datum"] = df["datum"].astype(str).str.strip()
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
         df["T_raw"] = pd.to_numeric(df["T_raw"], errors="coerce")
 
-        dag_offset  = (df["uur"] == 24).astype(int)
+        dag_offset    = (df["uur"] == 24).astype(int)
         df["uur_adj"] = df["uur"].mod(24)
 
         df["timestamp"] = (
@@ -100,7 +99,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
         )
 
         df["knmi_temp_C"] = df["T_raw"] / 10.0
-
         df = df[df["datum"].isin(dates)].copy()
 
         return df[["timestamp", "knmi_temp_C"]].dropna().reset_index(drop=True)
