@@ -39,8 +39,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
             timeout=20,
         )
         response.raise_for_status()
-        st.write("kolommen na inlezen:", df.columns.tolist())
-        st.write("eerste rij:", df.iloc[0].tolist())
     except Exception as e:
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
@@ -57,7 +55,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 break
 
         if header_idx is None:
-            # Geen header gevonden — gebruik vaste kolomnamen
+            # Geen header — gebruik vaste kolomnamen op basis van kolomvolgorde
             data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
             df = pd.read_csv(
                 io.StringIO("\n".join(data_lines)),
@@ -65,8 +63,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 names=["STN", "datum", "uur", "T_raw"],
                 skipinitialspace=True,
             )
-            st.write("kolommen na inlezen:", df.columns.tolist())
-            st.write("eerste rij:", df.iloc[0].tolist())
         else:
             # Header gevonden — lees met die header
             header_line = lines[header_idx].lstrip("#").strip()
@@ -78,10 +74,8 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 io.StringIO(header_line + "\n" + "\n".join(data_lines)),
                 skipinitialspace=True,
             )
-            # Kolomnamen opschonen
             df.columns = df.columns.str.strip().str.lstrip("#").str.strip()
-            # Hernoem naar standaard namen
-            for col in df.columns:
+            for col in list(df.columns):
                 c = col.strip().upper()
                 if "YYYYMMDD" in c:
                     df = df.rename(columns={col: "datum"})
@@ -94,8 +88,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
         df["T_raw"] = pd.to_numeric(df["T_raw"], errors="coerce")
 
-        # KNMI uur 24 = middernacht volgende dag
-        dag_offset = (df["uur"] == 24).astype(int)
+        dag_offset  = (df["uur"] == 24).astype(int)
         df["uur_adj"] = df["uur"].mod(24)
 
         df["timestamp"] = (
@@ -112,6 +105,8 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
 
     except Exception as e:
         st.warning(f"KNMI data kon niet worden verwerkt: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 
