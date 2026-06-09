@@ -120,13 +120,15 @@ def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame)
 
     import plotly.graph_objects as go
     fig.add_trace(
-    go.Scatter(
-        x=ref["timestamp"],
-        y=ref["knmi_temp_C"],
-        mode="lines",
-        name="KNMI referentie (Schiphol)",
-        line=dict(color="#1f77b4", dash="dash", width=1.5),
-        hovertemplate="%{x|%H:%M}<br>%{y:.1f} °C<extra>KNMI Schiphol</extra>",
+        go.Scatter(
+            x=ref["timestamp"],
+            y=ref["knmi_temp_C"],
+            mode="lines+markers",        # ← markers zodat hover werkt
+            marker=dict(size=6),
+            name="KNMI referentie (Schiphol)",
+            line=dict(color="#1f77b4", dash="dash", width=1.5),
+            hovertemplate="%{x|%H:%M}<br>%{y:.1f} °C<extra>KNMI Schiphol</extra>",
+        )
     )
-)
+    fig.update_layout(hovermode="x unified")  # ← toont beide traces tegelijk
     return fig
