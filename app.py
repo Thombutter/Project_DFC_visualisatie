@@ -208,17 +208,10 @@ def _zone_cache_key(df: pd.DataFrame) -> str:
 
 
 @st.cache_data(show_spinner="Zones classificeren (eenmalig)...")
-def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
-    """Classificeer de zones eenmaal en bewaar het resultaat.
+def classify_zones_cached(cache_key: str, file_bytes: bytes | None) -> pd.DataFrame:
+    """Cache hangt alleen af van cache_key (string) — snel te hashen."""
+    df = load_data(file_bytes)  # komt uit st.cache_data, dus gratis
 
-    1. Streamlit-cache: blijft bewaard zolang de server draait, opnieuw
-       runnen van de app triggert geen herberekening.
-    2. Parquet op schijf: overleeft ook een herstart van de server, zodat
-       de (trage) OSM-lookups maar een keer hoeven te gebeuren.
-    De cache_key hangt alleen af van de coordinaten; het tijdsfilter
-    verandert die niet, dus filteren triggert geen herclassificatie.
-    """
-    # Probeer eerst de schijf-cache
     if ZONE_CACHE_FILE.exists():
         try:
             cached = pd.read_parquet(ZONE_CACHE_FILE)
@@ -229,7 +222,6 @@ def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
 
     enriched = enrich_with_zones(df)
 
-    # Schrijf naar schijf voor volgende keer (best effort)
     try:
         to_save = enriched.copy()
         to_save["_cache_key"] = cache_key
@@ -296,7 +288,8 @@ show_classification = st.sidebar.checkbox(
 # Dit gebeurt voor het tijdsfilter, zodat het verschuiven van de slider
 # of een rerun geen nieuwe (trage) classificatie triggert.
 cols_before = set(df.columns)
-df = classify_zones_cached(df, _zone_cache_key(df))
+cache_key = _zone_cache_key(df)
+df = classify_zones_cached(cache_key, file_bytes)  # df ipv df als arg
 meetlopen = sorted(df["meting"].unique())
 gekozen_meting = st.sidebar.selectbox("Meetloop", meetlopen)
 
