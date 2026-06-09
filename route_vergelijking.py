@@ -182,3 +182,94 @@ def toon_route_vergelijking(df: pd.DataFrame):
         "en lagere temperatuur zijn zichtbaar in de grafiek en tabel. "
         "Vergelijk Meting 2 en 3 voor de droge omstandigheden."
     )
+
+
+def toon_correlatie_grafiek(df: pd.DataFrame):
+    """Scatterplot temperatuur vs luchtvochtigheid per meting."""
+
+    st.subheader("Correlatie temperatuur & luchtvochtigheid")
+    st.caption(
+        "Elk punt is één meting (5-secondeninterval). "
+        "De negatieve helling toont dat hogere temperatuur "
+        "samengaat met lagere luchtvochtigheid."
+    )
+
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    import numpy as np
+
+    fig = go.Figure()
+
+    for meting_nr in sorted(df["meting"].unique()):
+        sub = df[df["meting"] == meting_nr].dropna(subset=["tempC", "humidity"])
+        kleur = METING_KLEUREN.get(meting_nr, "#999")
+        label = METING_LABELS.get(meting_nr, f"Meting {meting_nr}")
+
+        # Scatterplot punten
+        fig.add_trace(
+            go.Scatter(
+                x=sub["tempC"],
+                y=sub["humidity"],
+                mode="markers",
+                name=label,
+                marker=dict(color=kleur, size=4, opacity=0.5),
+                legendgroup=f"m{meting_nr}",
+                hovertemplate="Temp: %{x:.1f}°C<br>Vocht: %{y:.1f}%<extra>" + label + "</extra>",
+            )
+        )
+
+        # Trendlijn via lineaire regressie
+        x = sub["tempC"].values
+        y = sub["humidity"].values
+        coef = np.polyfit(x, y, 1)
+        x_line = np.linspace(x.min(), x.max(), 100)
+        y_line = np.polyval(coef, x_line)
+
+        # Pearson r
+        r = np.corrcoef(x, y)[0, 1]
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_line,
+                y=y_line,
+                mode="lines",
+                name=f"{label} (r={r:.2f})",
+                line=dict(color=kleur, width=2),
+                legendgroup=f"m{meting_nr}",
+                showlegend=True,
+            )
+        )
+
+    fig.update_layout(
+        height=420,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_title="Temperatuur (°C)",
+        yaxis_title="Luchtvochtigheid (%)",
+        hovermode="closest",
+        legend=dict(orientation="h", y=-0.18),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Correlatietabel
+    rijen = []
+    for meting_nr in sorted(df["meting"].unique()):
+        sub = df[df["meting"] == meting_nr].dropna(subset=["tempC", "humidity"])
+        r = np.corrcoef(sub["tempC"].values, sub["humidity"].values)[0, 1]
+        rijen.append({
+            "Meting": METING_LABELS.get(meting_nr, f"Meting {meting_nr}"),
+            "Pearson r": f"{r:.3f}",
+            "Interpretatie": (
+                "Sterke negatieve correlatie" if r < -0.7 else
+                "Matige negatieve correlatie" if r < -0.4 else
+                "Zwakke correlatie"
+            ),
+        })
+
+    st.dataframe(pd.DataFrame(rijen), use_container_width=True, hide_index=True)
+
+    st.caption(
+        "Meting 1 (regen) heeft naar verwachting een andere helling dan "
+        "Meting 2 en 3 — regen voegt vocht toe onafhankelijk van temperatuur, "
+        "wat de correlatie verstoort."
+    )

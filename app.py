@@ -536,3 +536,5 @@ if zone_chart is not None:
 from route_vergelijking import toon_route_vergelijking
 st.divider()
 toon_route_vergelijking(df)  # df = volledige dataset, niet dff
+from route_vergelijking import toon_correlatie_grafiek
+toon_correlatie_grafiek(df)
