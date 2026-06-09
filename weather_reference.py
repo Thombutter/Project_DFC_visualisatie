@@ -4,7 +4,7 @@ weather_reference.py
 Haalt uurtemperaturen op van het KNMI voor de dagen van de meetlopen
 en voegt een referentielijn toe aan een Plotly-grafiek.
 
-Station: Schiphol (240) — dichtstbijzijnde KNMI-station bij Purmerend.
+Station: Schiphol (240) — dichtstbijzijnde KNMI-station bij Amsterdam.
 API:     https://www.daggegevens.knmi.nl/klimatologie/uurgegevens
          Geen API-key nodig, gratis publieke dienst.
 """
@@ -14,30 +14,15 @@ import requests
 import pandas as pd
 import streamlit as st
 
-
-# KNMI station dichtstbijzijnde de meetlocatie (Purmerend)
-KNMI_STATION = "240"  # Schiphol
+KNMI_STATION = "240"
 KNMI_URL = "https://www.daggegevens.knmi.nl/klimatologie/uurgegevens"
 
 
 @st.cache_data(show_spinner="KNMI referentiedata ophalen...")
-def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | None:
-    """Haal uurtemperaturen op van KNMI voor de opgegeven datums.
-
-    Parameters
-    ----------
-    dates : tuple van datumstrings (YYYYMMDD), of None om alle meetdagen te laden.
-
-    Returns
-    -------
-    DataFrame met kolommen 'timestamp' (tz-naive) en 'knmi_temp_C',
-    of None als de aanvraag mislukt.
-    """
+def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
     if dates is None:
-        # Standaard: alle drie de meetdagen
         dates = ("20260518", "20260527", "20260528")
 
-    # Bouw start/end: begin van eerste dag t/m einde van laatste dag
     start = min(dates) + "01"
     end   = max(dates) + "24"
 
@@ -48,7 +33,7 @@ def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | 
                 "start": start,
                 "end":   end,
                 "stns":  KNMI_STATION,
-                "vars":  "T",       # T = temperatuur in 0.1 °C
+                "vars":  "T",
                 "fmt":   "csv",
             },
             timeout=20,
@@ -58,38 +43,65 @@ def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | 
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
 
-    # Sla commentaarregels over (beginnen met #)
-    lines = [l for l in response.text.splitlines() if not l.startswith("#")]
-    if not lines:
-        return None
-
     try:
-        df = pd.read_csv(
-            io.StringIO("\n".join(lines)),
-            skipinitialspace=True,
-        )
-        st.write("KNMI kolommen:", df.columns.tolist())
-        st.write(df.head(3))
-        # Kolomnamen opschonen (KNMI geeft soms spaties mee)
-        df.columns = df.columns.str.strip()
+        lines = response.text.splitlines()
 
-        # Verwachte kolommen: STN, YYYYMMDD, HH, T
-        df = df.rename(columns={"YYYYMMDD": "datum", "HH": "uur", "T": "T_raw"})
-        df["datum"] = df["datum"].astype(str)
+        # Zoek de headerregel (begint met "# STN" of "STN")
+        header_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.lstrip("#").strip()
+            if stripped.upper().startswith("STN"):
+                header_idx = i
+                break
+
+        if header_idx is None:
+            # Geen header gevonden — gebruik vaste kolomnamen
+            data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
+            df = pd.read_csv(
+                io.StringIO("\n".join(data_lines)),
+                header=None,
+                names=["STN", "datum", "uur", "T_raw"],
+                skipinitialspace=True,
+            )
+        else:
+            # Header gevonden — lees met die header
+            header_line = lines[header_idx].lstrip("#").strip()
+            data_lines = [
+                l for l in lines[header_idx + 1:]
+                if not l.startswith("#") and l.strip()
+            ]
+            df = pd.read_csv(
+                io.StringIO(header_line + "\n" + "\n".join(data_lines)),
+                skipinitialspace=True,
+            )
+            # Kolomnamen opschonen
+            df.columns = df.columns.str.strip().str.lstrip("#").str.strip()
+            # Hernoem naar standaard namen
+            for col in df.columns:
+                c = col.strip().upper()
+                if "YYYYMMDD" in c:
+                    df = df.rename(columns={col: "datum"})
+                elif c == "HH":
+                    df = df.rename(columns={col: "uur"})
+                elif c == "T":
+                    df = df.rename(columns={col: "T_raw"})
+
+        df["datum"] = df["datum"].astype(str).str.strip()
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
         df["T_raw"] = pd.to_numeric(df["T_raw"], errors="coerce")
 
-        # KNMI uur 24 = middernacht volgende dag → zet om naar 0
-        df["uur_adj"] = df["uur"].mod(24)
+        # KNMI uur 24 = middernacht volgende dag
         dag_offset = (df["uur"] == 24).astype(int)
+        df["uur_adj"] = df["uur"].mod(24)
 
-        df["timestamp"] = pd.to_datetime(df["datum"], format="%Y%m%d") \
-            + pd.to_timedelta(df["uur_adj"], unit="h") \
+        df["timestamp"] = (
+            pd.to_datetime(df["datum"], format="%Y%m%d")
+            + pd.to_timedelta(df["uur_adj"], unit="h")
             + pd.to_timedelta(dag_offset, unit="D")
+        )
 
-        df["knmi_temp_C"] = df["T_raw"] / 10.0  # 0.1°C → °C
+        df["knmi_temp_C"] = df["T_raw"] / 10.0
 
-        # Filter op alleen de gevraagde datums
         df = df[df["datum"].isin(dates)].copy()
 
         return df[["timestamp", "knmi_temp_C"]].dropna().reset_index(drop=True)
@@ -100,15 +112,9 @@ def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | 
 
 
 def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame):
-    """Voeg KNMI referentielijn toe aan een Plotly-figuur.
-
-    Koppelt op basis van timestamp (nearest-hour match) zodat de
-    referentielijn alleen de tijdspanne van de meting beslaat.
-    """
     if reference_temp is None or reference_temp.empty:
         return fig
 
-    # Bepaal het tijdsbereik van de huidige meting
     t_start = dff["timestamp"].min().floor("h")
     t_end   = dff["timestamp"].max().ceil("h")
 
