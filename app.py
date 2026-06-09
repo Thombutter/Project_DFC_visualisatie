@@ -222,10 +222,10 @@ def classify_zones_cached(df: pd.DataFrame, cache_key: str) -> pd.DataFrame:
     if ZONE_CACHE_FILE.exists():
         try:
             cached = pd.read_parquet(ZONE_CACHE_FILE)
-            if cached["_cache_key"].iloc[0] == cache_key:
+            if cached["_cache_key"].iloc[0] == cache_key and "meting" in cached.columns:
                 return cached.drop(columns=["_cache_key"])
         except Exception:
-            pass  # corrupte/oude cache -> opnieuw berekenen
+            pass
 
     enriched = enrich_with_zones(df)
 
