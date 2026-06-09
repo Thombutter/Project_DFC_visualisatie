@@ -297,7 +297,7 @@ show_classification = st.sidebar.checkbox(
 # of een rerun geen nieuwe (trage) classificatie triggert.
 cols_before = set(df.columns)
 df = classify_zones_cached(df, _zone_cache_key(df))
-
+meetlopen = sorted(df["meting"].unique())  # ← moet VOOR de selectbox staan
 gekozen_meting = st.sidebar.selectbox("Meetloop", meetlopen)
 reference_temp = load_reference_temp()
 
