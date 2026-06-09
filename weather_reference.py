@@ -25,6 +25,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
 
     start = min(dates) + "01"
     end   = max(dates) + "24"
+    st.write("kolommen na rename:", df.columns.tolist())
 
     try:
         response = requests.post(
@@ -38,7 +39,6 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
             },
             timeout=20,
         )
-        st.write("kolommen na rename:", df.columns.tolist())
         response.raise_for_status()
     except Exception as e:
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
