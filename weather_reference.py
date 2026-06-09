@@ -39,7 +39,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
             timeout=20,
         )
         response.raise_for_status()
-        st.write("eerste rijen raw:", response.text[:500])
+        st.write("eerste rijen raw:", response.text[:2000])
     except Exception as e:
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
