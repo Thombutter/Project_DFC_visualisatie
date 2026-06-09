@@ -25,7 +25,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
 
     start = min(dates) + "01"
     end   = max(dates) + "24"
-    st.write("kolommen na rename:", df.columns.tolist())
+    
 
     try:
         response = requests.post(
@@ -84,6 +84,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                     df = df.rename(columns={col: "uur"})
                 elif c == "T":
                     df = df.rename(columns={col: "T_raw"})
+            st.write("kolommen na rename:", df.columns.tolist())
 
         df["datum"] = df["datum"].astype(str).str.strip()
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
