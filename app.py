@@ -532,9 +532,3 @@ zone_chart = zone_summary_chart(dff, metric_col, metric_label)
 if zone_chart is not None:
     st.plotly_chart(zone_chart, use_container_width=True)
 
-# Vergelijking drie meetlopen
-from route_vergelijking import toon_route_vergelijking
-st.divider()
-toon_route_vergelijking(df)  # df = volledige dataset, niet dff
-from route_vergelijking import toon_correlatie_grafiek
-toon_correlatie_grafiek(df)
