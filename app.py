@@ -297,12 +297,17 @@ show_classification = st.sidebar.checkbox(
 # of een rerun geen nieuwe (trage) classificatie triggert.
 cols_before = set(df.columns)
 df = classify_zones_cached(df, _zone_cache_key(df))
-meetlopen = sorted(df["meting"].unique())  # ← moet VOOR de selectbox staan
+meetlopen = sorted(df["meting"].unique())
 gekozen_meting = st.sidebar.selectbox("Meetloop", meetlopen)
+
+dff = df[df["meting"] == gekozen_meting].reset_index(drop=True)  # ← dit ontbrak
+
+if dff.empty:
+    st.warning("Geen data voor de gekozen meetloop.")
+    st.stop()
+
 reference_temp = load_reference_temp()
 
-# Detecteer automatisch welke kolom de classificatie heeft toegevoegd
-# (werkt ongeacht of die 'zone', 'zone_type', 'omgevingstype' o.i.d. heet).
 new_cols = [c for c in dff.columns if c not in cols_before]
 zone_col = None
 for candidate in ("zone", "zone_type", "zonetype", "omgevingstype",
