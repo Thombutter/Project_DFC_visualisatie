@@ -63,6 +63,8 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 names=["STN", "datum", "uur", "T_raw"],
                 skipinitialspace=True,
             )
+            st.write("kolommen na inlezen:", df.columns.tolist())
+            st.write("eerste rij:", df.iloc[0].tolist())
         else:
             # Header gevonden — lees met die header
             header_line = lines[header_idx].lstrip("#").strip()
