@@ -295,11 +295,13 @@ gekozen_meting = st.sidebar.selectbox("Meetloop", meetlopen)
 
 dff = df[df["meting"] == gekozen_meting].reset_index(drop=True)  # ← dit ontbrak
 
+meetdagen = tuple(sorted(dff["timestamp"].dt.strftime("%Y%m%d").unique()))
+reference_temp = load_reference_temp(dates=meetdagen)
 if dff.empty:
     st.warning("Geen data voor de gekozen meetloop.")
     st.stop()
 
-reference_temp = load_reference_temp()
+
 
 new_cols = [c for c in dff.columns if c not in cols_before]
 zone_col = None
