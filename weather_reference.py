@@ -1,176 +1,132 @@
 """
 weather_reference.py
 --------------------
-Referentie-temperatuur uit Open-Meteo.
+Haalt uurtemperaturen op van het KNMI voor de dagen van de meetlopen
+en voegt een referentielijn toe aan een Plotly-grafiek.
 
-Databron: https://open-meteo.com/ (geen API-sleutel nodig). We gebruiken
-de archief-API (ERA5 reanalyse) voor historische uren, en vallen terug
-op de forecast-API voor recente dagen die nog niet in het archief staan.
-
-`add_reference_to_chart` voegt een gestippelde referentielijn toe aan de
-bestaande Plotly-figuur met de gemeten temperatuur, zodat je de
-sensormeting kunt vergelijken met de officiele buitentemperatuur.
+Station: Schiphol (240) — dichtstbijzijnde KNMI-station bij Purmerend.
+API:     https://www.daggegevens.knmi.nl/klimatologie/uurgegevens
+         Geen API-key nodig, gratis publieke dienst.
 """
 
-from __future__ import annotations
-
-import datetime as _dt
-import json
-import urllib.error
-import urllib.parse
-import urllib.request
-
+import io
+import requests
 import pandas as pd
-
-try:
-    import streamlit as st
-except Exception:  # pragma: no cover
-    st = None
+import streamlit as st
 
 
-ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+# KNMI station dichtstbijzijnde de meetlocatie (Purmerend)
+KNMI_STATION = "240"  # Schiphol
+KNMI_URL = "https://www.daggegevens.knmi.nl/klimatologie/uurgegevens"
 
 
-def _parse_date(date) -> _dt.date | None:
-    """Accepteer 'YYYYMMDD', 'YYYY-MM-DD', date/datetime of None."""
-    if date is None:
-        return None
-    if isinstance(date, _dt.datetime):
-        return date.date()
-    if isinstance(date, _dt.date):
-        return date
-    s = str(date).strip()
-    for fmt in ("%Y%m%d", "%Y-%m-%d"):
-        try:
-            return _dt.datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _http_json(url: str, params: dict):
-    """Eenvoudige GET die JSON teruggeeft, of None bij een fout."""
-    query = urllib.parse.urlencode(params)
-    try:
-        with urllib.request.urlopen(f"{url}?{query}", timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError):
-        return None
-
-
-def load_reference_temp(date=None, lat: float | None = None,
-                        lon: float | None = None) -> pd.DataFrame | None:
-    """Haal uurlijkse referentie-temperatuur op via Open-Meteo.
+@st.cache_data(show_spinner="KNMI referentiedata ophalen...")
+def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | None:
+    """Haal uurtemperaturen op van KNMI voor de opgegeven datums.
 
     Parameters
     ----------
-    date : str | date | None
-        Dag waarvoor de referentie wordt opgehaald. Mag ook het
-        'YYYYMMDD'-formaat zijn. None -> dan wordt later (in
-        add_reference_to_chart) de datum uit de meetdata afgeleid.
-    lat, lon : float | None
-        Locatie. None -> standaard Beverwijk/IJmuiden-omgeving, wordt
-        zo nodig in add_reference_to_chart overschreven met de
-        routelocatie uit de meetdata.
+    dates : tuple van datumstrings (YYYYMMDD), of None om alle meetdagen te laden.
 
     Returns
     -------
-    DataFrame met kolommen ['time', 'temp_ref'] of None.
+    DataFrame met kolommen 'timestamp' (tz-naive) en 'knmi_temp_C',
+    of None als de aanvraag mislukt.
     """
-    day = _parse_date(date)
-    if day is None:
-        # Geen vaste datum: signaleer dat de datum later uit de data komt.
-        return pd.DataFrame(columns=["time", "temp_ref"])
+    if dates is None:
+        # Standaard: alle drie de meetdagen
+        dates = ("20260518", "20260527", "20260528")
 
-    if lat is None or lon is None:
-        lat, lon = 52.46, 4.61  # Beverwijk/IJmuiden-omgeving
+    # Bouw start/end: begin van eerste dag t/m einde van laatste dag
+    start = min(dates) + "01"
+    end   = max(dates) + "24"
 
-    return _fetch_hourly_temp(lat, lon, day)
-
-
-def _fetch_hourly_temp(lat: float, lon: float,
-                        day: _dt.date) -> pd.DataFrame | None:
-    """Uurlijkse 2m-temperatuur voor een dag/locatie via Open-Meteo."""
-    iso = day.isoformat()
-    common = {
-        "latitude": round(lat, 4),
-        "longitude": round(lon, 4),
-        "hourly": "temperature_2m",
-        "timezone": "Europe/Amsterdam",
-        "start_date": iso,
-        "end_date": iso,
-    }
-
-    # Recente dagen staan nog niet in het ERA5-archief -> forecast-API
-    # (die heeft een paar maanden aan verleden via past_days niet, maar
-    # wel een 'archive'-achtige dekking voor de afgelopen ~3 maanden).
-    age_days = (_dt.date.today() - day).days
-    url = ARCHIVE_URL if age_days >= 5 else FORECAST_URL
-
-    payload = _http_json(url, common)
-    if payload is None and url != ARCHIVE_URL:
-        payload = _http_json(ARCHIVE_URL, common)  # laatste poging
-    if not payload or "hourly" not in payload:
-        if st is not None:
-            st.info(
-                "Open-Meteo referentie niet beschikbaar voor deze dag/"
-                "locatie - de grafiek toont alleen de sensormeting."
-            )
+    try:
+        response = requests.post(
+            KNMI_URL,
+            data={
+                "start": start,
+                "end":   end,
+                "stns":  KNMI_STATION,
+                "vars":  "T",       # T = temperatuur in 0.1 °C
+                "fmt":   "csv",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+    except Exception as e:
+        st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
 
-    times = payload["hourly"].get("time", [])
-    temps = payload["hourly"].get("temperature_2m", [])
-    if not times or not temps:
+    # Sla commentaarregels over (beginnen met #)
+    lines = [l for l in response.text.splitlines() if not l.startswith("#")]
+    if not lines:
         return None
 
-    out = pd.DataFrame(
-        {"time": pd.to_datetime(times), "temp_ref": temps}
-    ).dropna()
-    return out if not out.empty else None
+    try:
+        df = pd.read_csv(
+            io.StringIO("\n".join(lines)),
+            skipinitialspace=True,
+        )
+
+        # Kolomnamen opschonen (KNMI geeft soms spaties mee)
+        df.columns = df.columns.str.strip()
+
+        # Verwachte kolommen: STN, YYYYMMDD, HH, T
+        df = df.rename(columns={"YYYYMMDD": "datum", "HH": "uur", "T": "T_raw"})
+        df["datum"] = df["datum"].astype(str)
+        df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
+        df["T_raw"] = pd.to_numeric(df["T_raw"], errors="coerce")
+
+        # KNMI uur 24 = middernacht volgende dag → zet om naar 0
+        df["uur_adj"] = df["uur"].mod(24)
+        dag_offset = (df["uur"] == 24).astype(int)
+
+        df["timestamp"] = pd.to_datetime(df["datum"], format="%Y%m%d") \
+            + pd.to_timedelta(df["uur_adj"], unit="h") \
+            + pd.to_timedelta(dag_offset, unit="D")
+
+        df["knmi_temp_C"] = df["T_raw"] / 10.0  # 0.1°C → °C
+
+        # Filter op alleen de gevraagde datums
+        df = df[df["datum"].isin(dates)].copy()
+
+        return df[["timestamp", "knmi_temp_C"]].dropna().reset_index(drop=True)
+
+    except Exception as e:
+        st.warning(f"KNMI data kon niet worden verwerkt: {e}")
+        return None
 
 
-def add_reference_to_chart(fig, dff: pd.DataFrame, ref):
-    """Voeg de Open-Meteo referentielijn toe aan de temperatuurgrafiek.
+def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame):
+    """Voeg KNMI referentielijn toe aan een Plotly-figuur.
 
-    `ref` is het resultaat van load_reference_temp. Als dat leeg is (geen
-    vaste datum opgegeven), wordt de juiste dag en locatie alsnog uit de
-    meetdata `dff` afgeleid en hier opgehaald.
+    Koppelt op basis van timestamp (nearest-hour match) zodat de
+    referentielijn alleen de tijdspanne van de meting beslaat.
     """
-    if dff is None or dff.empty or "timestamp" not in dff:
+    if reference_temp is None or reference_temp.empty:
         return fig
 
-    need_fetch = ref is None or (
-        isinstance(ref, pd.DataFrame) and ref.empty
-    )
-    if need_fetch:
-        ts = pd.to_datetime(dff["timestamp"], errors="coerce").dropna()
-        if ts.empty:
-            return fig
-        day = ts.iloc[len(ts) // 2].date()  # representatieve dag
-        if {"latitude", "longitude"}.issubset(dff.columns):
-            lat = float(dff["latitude"].mean())
-            lon = float(dff["longitude"].mean())
-        else:
-            lat, lon = 52.46, 4.61
-        ref = _fetch_hourly_temp(lat, lon, day)
+    # Bepaal het tijdsbereik van de huidige meting
+    t_start = dff["timestamp"].min().floor("h")
+    t_end   = dff["timestamp"].max().ceil("h")
 
-    if ref is None or not isinstance(ref, pd.DataFrame) or ref.empty:
+    ref = reference_temp[
+        (reference_temp["timestamp"] >= t_start) &
+        (reference_temp["timestamp"] <= t_end)
+    ].copy()
+
+    if ref.empty:
         return fig
 
-    # Beperk de referentielijn tot het tijdsbereik van de meting
-    ts = pd.to_datetime(dff["timestamp"], errors="coerce")
-    tmin, tmax = ts.min(), ts.max()
-    sub = ref[(ref["time"] >= tmin - pd.Timedelta(hours=1))
-              & (ref["time"] <= tmax + pd.Timedelta(hours=1))]
-    if sub.empty:
-        sub = ref
-
-    fig.add_scatter(
-        x=sub["time"],
-        y=sub["temp_ref"],
-        mode="lines",
-        name="Referentie (Open-Meteo)",
-        line=dict(color="#1f77b4", dash="dash", width=2),
+    import plotly.graph_objects as go
+    fig.add_trace(
+        go.Scatter(
+            x=ref["timestamp"],
+            y=ref["knmi_temp_C"],
+            mode="lines",
+            name="KNMI referentie (Schiphol)",
+            line=dict(color="#1f77b4", dash="dash", width=1.5),
+        )
     )
     return fig
