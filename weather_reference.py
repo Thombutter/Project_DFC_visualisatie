@@ -18,7 +18,8 @@ import streamlit as st
 # KNMI station dichtstbijzijnde de meetlocatie (Purmerend)
 KNMI_STATION = "240"  # Schiphol
 KNMI_URL = "https://www.daggegevens.knmi.nl/klimatologie/uurgegevens"
-
+st.write("KNMI kolommen:", df.columns.tolist())
+st.write(df.head(3))
 
 @st.cache_data(show_spinner="KNMI referentiedata ophalen...")
 def load_reference_temp(dates: tuple[str, ...] | None = None) -> pd.DataFrame | None:
