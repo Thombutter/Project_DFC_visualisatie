@@ -84,6 +84,7 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
                 elif c == "T":
                     rename[col] = "T_raw"
             df = df.rename(columns=rename)
+            st.write("kolommen na rename:", df.columns.tolist())
 
         df["datum"] = df["datum"].astype(str).str.strip()
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
