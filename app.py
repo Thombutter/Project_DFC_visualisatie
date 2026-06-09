@@ -149,10 +149,40 @@ def load_data(file_bytes: bytes | None) -> pd.DataFrame:
     for col in ["co2_ppm", "tempC", "humidity"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Alleen rijen met geldige GPS-positie houden voor de kaart
+    # Alleen rijen met geldige GPS-positie houden
     df = df.dropna(subset=["latitude", "longitude"]).reset_index(drop=True)
     df = df[(df["latitude"].between(-90, 90)) &
             (df["longitude"].between(-180, 180))]
+
+    # ------------------------------------------------------------------ #
+    # Meetlopen detecteren op basis van tijdgaten > 1 uur
+    # ------------------------------------------------------------------ #
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    df["_gap"] = df["timestamp"].diff().dt.total_seconds().fillna(0)
+    df["_run_raw"] = (df["_gap"] > 3600).cumsum()
+
+    valid_runs = (
+        df.groupby("_run_raw")["latitude"]
+        .count()
+        .loc[lambda s: s > 0]
+        .index
+    )
+    df = df[df["_run_raw"].isin(valid_runs)].copy()
+
+    run_map = {raw: i + 1 for i, raw in enumerate(sorted(valid_runs))}
+    df["meting"] = df["_run_raw"].map(run_map)
+    df = df.drop(columns=["_gap", "_run_raw"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------ #
+    # Tijdscorrectie: verschuif elke meting naar de werkelijke starttijd
+    # ------------------------------------------------------------------ #
+    for meting_nr, werkelijke_start in WERKELIJKE_START.items():
+        mask = df["meting"] == meting_nr
+        if not mask.any():
+            continue
+        eerste_ts = df.loc[mask, "timestamp"].iloc[0]
+        offset = werkelijke_start - eerste_ts
+        df.loc[mask, "timestamp"] = df.loc[mask, "timestamp"] + offset
 
     return df.reset_index(drop=True)
 
