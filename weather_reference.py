@@ -1,89 +1,109 @@
 """
 weather_reference.py
 --------------------
-Haalt uurtemperaturen op via Open-Meteo (historische data) voor de
-dagen van de meetlopen en voegt een referentielijn toe aan een
-Plotly-grafiek.
+Haalt uurtemperaturen op van het KNMI voor de dagen van de meetlopen
+en voegt een referentielijn toe aan een Plotly-grafiek.
 
-API:  https://archive-api.open-meteo.com/v1/archive
-      Geen API-key nodig, gratis publieke dienst.
-Locatie: Amsterdam centrum (Mauritskade/Nieuwmarkt)
+Station: Schiphol (240) — dichtstbijzijnde KNMI-station bij Amsterdam.
+API:     https://www.daggegevens.knmi.nl/klimatologie/uurgegevens
+         Geen API-key nodig, gratis publieke dienst.
 """
 
+import io
+import re
 import requests
 import pandas as pd
 import streamlit as st
 
-# Coördinaten Amsterdam centrum
-LAT = 52.364
-LON = 4.910
-
-OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
+KNMI_STATION = "240"
+KNMI_URL = "https://www.daggegevens.knmi.nl/klimatologie/uurgegevens"
 
 
-@st.cache_data(show_spinner="Open-Meteo referentiedata ophalen...")
+@st.cache_data(show_spinner="KNMI referentiedata ophalen...")
 def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
-    """Haal uurtemperaturen op van Open-Meteo voor de opgegeven datums.
-
-    Parameters
-    ----------
-    dates : tuple van datumstrings (YYYYMMDD), of None om alle meetdagen te laden.
-
-    Returns
-    -------
-    DataFrame met kolommen 'timestamp' en 'knmi_temp_C', of None bij fout.
-    """
     if dates is None:
         dates = ("20260518", "20260527", "20260528")
 
-    # Open-Meteo verwacht YYYY-MM-DD formaat
-    def fmt(d):
-        return f"{d[:4]}-{d[4:6]}-{d[6:]}"
-
-    start_date = fmt(min(dates))
-    end_date   = fmt(max(dates))
+    start = min(dates) + "01"
+    end   = max(dates) + "24"
 
     try:
-        response = requests.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude":        LAT,
-                "longitude":       LON,
-                "start_date":      start_date,
-                "end_date":        end_date,
-                "hourly":          "temperature_2m",
-                "timezone":        "Europe/Amsterdam",
+        response = requests.post(
+            KNMI_URL,
+            data={
+                "start": start,
+                "end":   end,
+                "stns":  KNMI_STATION,
+                "vars":  "T",
+                "fmt":   "csv",
             },
             timeout=20,
         )
         response.raise_for_status()
-        data = response.json()
     except Exception as e:
-        st.warning(f"Open-Meteo data kon niet worden opgehaald: {e}")
+        st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
 
     try:
-        hourly = data["hourly"]
-        df = pd.DataFrame({
-            "timestamp":    pd.to_datetime(hourly["time"]),
-            "knmi_temp_C":  hourly["temperature_2m"],
+        text = response.text
+
+        # Vind de headerregel STN,YYYYMMDD,HH,...
+        header_match = re.search(r"STN,YYYYMMDD,HH[^\n]*", text)
+        if header_match is None:
+            st.warning("KNMI: geen headerregel gevonden.")
+            return None
+
+        # Alles na de header is data — maar datarijen staan mogelijk
+        # aaneengesloten op één regel, gescheiden door spaties.
+        # Splits op patroon: getal,getal (stationsnummer aan het begin)
+        data_text = text[header_match.end():]
+
+        # Voeg newline in vóór elk voorkomen van het stationsnummer (240,)
+        data_text = re.sub(r"\s+" + KNMI_STATION + r",", "\n" + KNMI_STATION + ",", data_text)
+        data_text = data_text.strip()
+
+        header_line = header_match.group(0)
+        df = pd.read_csv(
+            io.StringIO(header_line + "\n" + data_text),
+            skipinitialspace=True,
+        )
+
+        # Kolomnamen opschonen
+        df.columns = df.columns.str.strip()
+
+        # Hernoem naar interne namen
+        df = df.rename(columns={
+            "YYYYMMDD": "datum",
+            "HH": "uur",
+            "T": "T_raw",
         })
 
-        # Filter op alleen de gevraagde datums
-        df["datum"] = df["timestamp"].dt.strftime("%Y%m%d")
-        df = df[df["datum"].isin(dates)].drop(columns="datum")
+        df["datum"] = df["datum"].astype(str).str.strip()
+        df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
+        df["T_raw"] = pd.to_numeric(df["T_raw"], errors="coerce")
 
-        return df.dropna().reset_index(drop=True)
+        dag_offset    = (df["uur"] == 24).astype(int)
+        df["uur_adj"] = df["uur"].mod(24)
+
+        df["timestamp"] = (
+            pd.to_datetime(df["datum"], format="%Y%m%d")
+            + pd.to_timedelta(df["uur_adj"], unit="h")
+            + pd.to_timedelta(dag_offset, unit="D")
+        )
+
+        df["knmi_temp_C"] = df["T_raw"] / 10.0
+        df = df[df["datum"].isin(dates)].copy()
+
+        return df[["timestamp", "knmi_temp_C"]].dropna().reset_index(drop=True)
 
     except Exception as e:
-        st.warning(f"Open-Meteo data kon niet worden verwerkt: {e}")
+        st.warning(f"KNMI data kon niet worden verwerkt: {e}")
         import traceback
         st.code(traceback.format_exc())
         return None
 
 
 def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame):
-    """Voeg Open-Meteo referentielijn toe aan een Plotly-figuur."""
     if reference_temp is None or reference_temp.empty:
         return fig
 
@@ -103,21 +123,27 @@ def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame)
         go.Scatter(
             x=ref["timestamp"],
             y=ref["knmi_temp_C"],
-            mode="lines+markers",
-            marker=dict(size=6),
-            name="Open-Meteo referentie (Amsterdam)",
+            mode="lines",
+            name="KNMI referentie (Schiphol)",
             line=dict(color="#1f77b4", dash="dash", width=1.5),
-            hovertemplate="%{x|%H:%M}<br>%{y:.1f} °C<extra>Open-Meteo Amsterdam</extra>",
         )
     )
-    fig.update_layout(hovermode="x unified")
     return fig
 
 
 def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
-    """Statische analyse van het stedelijk warmte-eiland effect."""
+    """Toont een statische analyse van het stedelijk warmte-eiland effect.
+
+    Vergelijkt de gemeten temperatuur (per uur gemiddeld) met de KNMI
+    referentie en beantwoordt drie vragen:
+    1. Gemiddeld temperatuurverschil
+    2. Maximaal temperatuurverschil
+    3. Factoren die het verschil verklaren
+    """
     if reference_temp is None or reference_temp.empty:
         return
+
+    import streamlit as st
 
     # Resample meting naar uurgemiddelden
     meting_uur = (
@@ -128,13 +154,14 @@ def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
         .rename(columns={"tempC": "meting_C"})
     )
 
+    # Merge met KNMI op dichtstbijzijnde uur
     ref = reference_temp.copy()
-    ref["timestamp"]      = ref["timestamp"].dt.floor("h")
+    ref["timestamp"] = ref["timestamp"].dt.floor("h")
     meting_uur["timestamp"] = meting_uur["timestamp"].dt.floor("h")
 
     merged = meting_uur.merge(ref, on="timestamp", how="inner")
     if merged.empty:
-        st.info("Geen overlappende uurdata tussen meting en referentie.")
+        st.info("Geen overlappende uurdata tussen meting en KNMI referentie.")
         return
 
     merged["verschil"] = merged["meting_C"] - merged["knmi_temp_C"]
@@ -151,7 +178,7 @@ def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
     c1.metric(
         "Gemiddeld verschil",
         f"+{gem_verschil:.1f} °C",
-        help="Gemiddelde van (jouw meting − Open-Meteo referentie) per uur"
+        help="Gemiddelde van (jouw meting − KNMI Schiphol) per uur"
     )
     c2.metric(
         "Maximaal verschil",
@@ -161,7 +188,7 @@ def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
     c3.metric(
         "Tijdstip maximum",
         max_tijdstip.strftime("%H:%M"),
-        help=f"Meting: {max_meting:.1f} °C  |  Referentie: {max_knmi:.1f} °C"
+        help=f"Meting: {max_meting:.1f} °C  |  KNMI: {max_knmi:.1f} °C"
     )
 
     st.markdown("**Waarom is het centrum warmer dan de buitenrand?**")
@@ -170,25 +197,24 @@ De route loopt van de **Mauritskade** langs **Artis** naar de **Nieuwmarkt** —
 een gradiënt van relatief open naar dicht bebouwd, die zichtbaar is in de
 temperatuurmeting:
 
-- **Mauritskade (startpunt)** — open ligging langs het water en brede kade
-  zorgen voor enige koeling door verdamping en wind. Dit is het koelste
-  deel van de route.
-- **Langs Artis** — het parkgroen en de bomen langs Artis dempen de
-  opwarming tijdelijk via verdamping (evapotranspiratie) en schaduw.
+- **Mauritskade (startpunt)** — open ligging langs het Nieuwe Herengracht-water
+  en brede kade zorgen voor enige koeling door verdamping en wind. Dit is
+  het koelste deel van de route.
+- **Langs Artis** — het parkgroen en de bomen langs Artis dempen de opwarming
+  tijdelijk. Groen koelt via verdamping (evapotranspiratie) en schaduw.
 - **Nieuwmarkt (eindpunt)** — dichte bebouwing, weinig groen, veel toeristen
-  en horeca. Steen en asfalt slaan overdag warmte op. Wind wordt
-  geblokkeerd door smalle straatjes.
+  en horeca. Steen en asfalt slaan overdag warmte op en geven die af als
+  voelbare hitte. Wind wordt geblokkeerd door de smalle straatjes.
 - **Verharding** — het aandeel verharding neemt toe richting de Nieuwmarkt,
   met minder verdampingskoeling als gevolg.
 - **Menselijke warmtebronnen** — verkeer, airconditioning en mensen leveren
   extra warmte, geconcentreerd in het drukke centrum.
-- **Open-Meteo referentie** — gebaseerd op een gridpunt boven Amsterdam
-  centrum (~1km² gemiddelde), wat de stedelijke opwarming deels al
-  meeneemt maar minder gevoelig is voor lokale straatniveau-effecten.
+- **KNMI-referentie** — Schiphol meet op een open vliegveld zonder bebouwing,
+  waardoor de referentie structureel koeler is dan elk stedelijk punt.
 """)
 
     st.caption(
         f"Gebaseerd op {len(merged)} uurgemiddelden · "
         f"Meting: {merged['meting_C'].mean():.1f} °C gemiddeld · "
-        f"Open-Meteo: {merged['knmi_temp_C'].mean():.1f} °C gemiddeld"
+        f"KNMI Schiphol: {merged['knmi_temp_C'].mean():.1f} °C gemiddeld"
     )
