@@ -193,20 +193,24 @@ def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
 
     st.markdown("**Waarom is het centrum warmer dan de buitenrand?**")
     st.markdown("""
-- **Verharding en bebouwing** — steen, asfalt en beton absorberen overdag meer
-  zonne-energie dan gras of water en geven die 's middags als warmte af.
-  De Mauritskade–Nieuwmarkt route loopt van een relatief open
-  grachtzone naar een dicht bebouwd stedelijk kern.
-- **Verminderde verdamping** — weinig groen betekent weinig
-  verdampingskoeling. Bomen en water langs de Mauritskade koelen
-  de lucht meetbaar.
-- **Menselijke warmtebronnen** — verkeer, airconditioning en mensen
-  produceren extra warmte, geconcentreerd in het centrum.
-- **Windafscherming** — hoge gebouwen rond de Nieuwmarkt blokkeren
-  wind, waardoor opgewarmde lucht minder snel wordt afgevoerd.
-- **Meetpositie** — KNMI Schiphol meet op een open vliegveld zonder
-  bebouwing, wat de referentie structureel koeler maakt dan
-  welk stedelijk punt dan ook.
+De route loopt van de **Mauritskade** langs **Artis** naar de **Nieuwmarkt** —
+een gradiënt van relatief open naar dicht bebouwd, die zichtbaar is in de
+temperatuurmeting:
+
+- **Mauritskade (startpunt)** — open ligging langs het Nieuwe Herengracht-water
+  en brede kade zorgen voor enige koeling door verdamping en wind. Dit is
+  het koelste deel van de route.
+- **Langs Artis** — het parkgroen en de bomen langs Artis dempen de opwarming
+  tijdelijk. Groen koelt via verdamping (evapotranspiratie) en schaduw.
+- **Nieuwmarkt (eindpunt)** — dichte bebouwing, weinig groen, veel toeristen
+  en horeca. Steen en asfalt slaan overdag warmte op en geven die af als
+  voelbare hitte. Wind wordt geblokkeerd door de smalle straatjes.
+- **Verharding** — het aandeel verharding neemt toe richting de Nieuwmarkt,
+  met minder verdampingskoeling als gevolg.
+- **Menselijke warmtebronnen** — verkeer, airconditioning en mensen leveren
+  extra warmte, geconcentreerd in het drukke centrum.
+- **KNMI-referentie** — Schiphol meet op een open vliegveld zonder bebouwing,
+  waardoor de referentie structureel koeler is dan elk stedelijk punt.
 """)
 
     st.caption(
