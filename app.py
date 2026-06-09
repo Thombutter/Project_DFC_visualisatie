@@ -534,3 +534,7 @@ zone_chart = zone_summary_chart(dff, metric_col, metric_label)
 if zone_chart is not None:
     st.plotly_chart(zone_chart, use_container_width=True)
 
+from route_vergelijking import toon_route_vergelijking, toon_co2_ruimtelijke_analyse
+# Dit toont je nieuwe CO2-subplot direct in de app!
+toon_co2_ruimtelijke_analyse(df)
+

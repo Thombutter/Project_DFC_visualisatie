@@ -273,3 +273,119 @@ def toon_correlatie_grafiek(df: pd.DataFrame):
         "Meting 2 en 3 — regen voegt vocht toe onafhankelijk van temperatuur, "
         "wat de correlatie verstoort."
     )
+
+
+
+def toon_co2_ruimtelijke_analyse(df: pd.DataFrame):
+    st.subheader("Ruimtelijke Analyse: CO₂ vs Temperatuur langs de Route")
+    st.caption(
+        "In deze grafieken zijn de meetwaarden direct gekoppeld aan de gelopen meters vanaf de Mauritskade. "
+        "Door te kijken waar pieken in CO₂ en Temperatuur synchroon lopen, kunnen lokale antropogene bronnen "
+        "worden geïdentificeerd."
+    )
+
+    # 1. Bereken de cumulatieve afstand met jouw bestaande functie
+    df_verrijkt = voeg_afstand_toe(df)
+
+    # 2. Maak gesynchroniseerde subplots (2 rijen onder elkaar)
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        subplot_titles=("CO₂ Concentratie (ppm)", "Temperatuur (°C)"),
+        vertical_spacing=0.12,
+    )
+
+    # 3. Plot de data voor elke meting
+    for meting_nr in sorted(df_verrijkt["meting"].unique()):
+        sub = df_verrijkt[df_verrijkt["meting"] == meting_nr].sort_values("afstand_m")
+        
+        kleur = METING_KLEUREN.get(meting_nr, "#999")
+        label = METING_LABELS.get(meting_nr, f"Meting {meting_nr}")
+
+        # Subplot 1: CO2 (We passen ook hier 'smooth' toe tegen de sensor-ruis)
+        fig.add_trace(
+            go.Scatter(
+                x=sub["afstand_m"],
+                y=smooth(sub["co2_ppm"]),
+                mode="lines",
+                name=label,
+                line=dict(color=kleur, width=2),
+                legendgroup=f"m{meting_nr}",
+                hovertemplate="Afstand: %{x:.0f}m<br>CO₂: %{y:.0f} ppm<extra>" + label + "</extra>",
+            ),
+            row=1, col=1,
+        )
+
+        # Subplot 2: Temperatuur
+        fig.add_trace(
+            go.Scatter(
+                x=sub["afstand_m"],
+                y=smooth(sub["tempC"]),
+                mode="lines",
+                name=label,
+                line=dict(color=kleur, width=2),
+                legendgroup=f"m{meting_nr}",
+                showlegend=False, # Voorkom dubbele legenda-items
+                hovertemplate="Afstand: %{x:.0f}m<br>Temp: %{y:.1f}°C<extra>" + label + "</extra>",
+            ),
+            row=2, col=1,
+        )
+
+    # 4. Voeg jouw verticale annotatielijnen toe aan beide subplots
+    max_afstand = df_verrijkt["afstand_m"].max()
+    for ann in ROUTE_ANNOTATIES:
+        if ann["afstand_m"] > max_afstand:
+            continue
+        
+        for row in [1, 2]:
+            fig.add_vline(
+                x=ann["afstand_m"],
+                line=dict(color="rgba(255,255,255,0.25)", dash="dash", width=1),
+                row=row, col=1,
+            )
+            
+        # Label alleen boven het bovenste subplot (CO2)
+        fig.add_annotation(
+            x=ann["afstand_m"],
+            y=1.05,
+            yref="paper",
+            text=ann["label"],
+            showarrow=False,
+            font=dict(size=10, color="rgba(255,255,255,0.7)"),
+            textangle=-30,
+            xanchor="left",
+            row=1, col=1
+        )
+
+    fig.update_layout(
+        height=600,
+        margin=dict(l=10, r=10, t=60, b=10),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=-0.10),
+    )
+    
+    fig.update_xaxes(title_text="Afstand vanaf start (m)", row=2, col=1)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 5. Tabel met CO2-gemiddelden per zone (Analoog aan jouw temperatuurtabel)
+    st.markdown("**CO₂-gemiddelden per zone**")
+    zones = [
+        ("Mauritskade (0–400m)",  0,    400),
+        ("Langs Artis (400–1200m)", 400, 1200),
+        ("Richting Nieuwmarkt (1200m+)", 1200, 9999),
+    ]
+    
+    rijen = []
+    for zone_label, z_min, z_max in zones:
+        rij = {"Zone": zone_label}
+        for meting_nr in sorted(df_verrijkt["meting"].unique()):
+            sub = df_verrijkt[(df_verrijkt["meting"] == meting_nr) &
+                             (df_verrijkt["afstand_m"] >= z_min) &
+                             (df_verrijkt["afstand_m"] < z_max)]
+            if not sub.empty and "co2_ppm" in sub.columns:
+                rij[f"CO₂ M{meting_nr} (ppm)"] = f"{sub['co2_ppm'].mean():.0f}"
+            else:
+                rij[f"CO₂ M{meting_nr} (ppm)"] = "—"
+        rijen.append(rij)
+
+    st.dataframe(pd.DataFrame(rijen), use_container_width=True, hide_index=True)
