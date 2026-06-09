@@ -10,6 +10,7 @@ API:     https://www.daggegevens.knmi.nl/klimatologie/uurgegevens
 """
 
 import io
+import re
 import requests
 import pandas as pd
 import streamlit as st
@@ -39,53 +40,43 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
             timeout=20,
         )
         response.raise_for_status()
-        st.write("eerste rijen raw:", response.text[:2000])
     except Exception as e:
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
 
     try:
-        lines = response.text.splitlines()
+        text = response.text
 
-        # Zoek de headerregel die YYYYMMDD bevat (niet de stationsinfo-regel)
-        header_idx = None
-        for i, line in enumerate(lines):
-            if "YYYYMMDD" in line.upper():
-                header_idx = i
-                break
+        # Vind de headerregel STN,YYYYMMDD,HH,...
+        header_match = re.search(r"STN,YYYYMMDD,HH[^\n]*", text)
+        if header_match is None:
+            st.warning("KNMI: geen headerregel gevonden.")
+            return None
 
-        if header_idx is None:
-            # Geen header — gebruik vaste kolomvolgorde (STN, datum, uur, T)
-            data_lines = [l for l in lines if not l.startswith("#") and l.strip()]
-            df = pd.read_csv(
-                io.StringIO("\n".join(data_lines)),
-                header=None,
-                names=["STN", "datum", "uur", "T_raw"],
-                skipinitialspace=True,
-            )
-        else:
-            header_line = lines[header_idx].lstrip("#").strip()
-            data_lines = [
-                l for l in lines[header_idx + 1:]
-                if not l.startswith("#") and l.strip()
-            ]
-            df = pd.read_csv(
-                io.StringIO(header_line + "\n" + "\n".join(data_lines)),
-                skipinitialspace=True,
-            )
-            # Kolomnamen opschonen en hernoemen
-            df.columns = df.columns.str.strip().str.lstrip("#").str.strip()
-            rename = {}
-            for col in df.columns:
-                c = col.upper()
-                if "YYYYMMDD" in c:
-                    rename[col] = "datum"
-                elif c == "HH":
-                    rename[col] = "uur"
-                elif c == "T":
-                    rename[col] = "T_raw"
-            df = df.rename(columns=rename)
-            st.write("kolommen na rename:", df.columns.tolist())
+        # Alles na de header is data — maar datarijen staan mogelijk
+        # aaneengesloten op één regel, gescheiden door spaties.
+        # Splits op patroon: getal,getal (stationsnummer aan het begin)
+        data_text = text[header_match.end():]
+
+        # Voeg newline in vóór elk voorkomen van het stationsnummer (240,)
+        data_text = re.sub(r"\s+" + KNMI_STATION + r",", "\n" + KNMI_STATION + ",", data_text)
+        data_text = data_text.strip()
+
+        header_line = header_match.group(0)
+        df = pd.read_csv(
+            io.StringIO(header_line + "\n" + data_text),
+            skipinitialspace=True,
+        )
+
+        # Kolomnamen opschonen
+        df.columns = df.columns.str.strip()
+
+        # Hernoem naar interne namen
+        df = df.rename(columns={
+            "YYYYMMDD": "datum",
+            "HH": "uur",
+            "T": "T_raw",
+        })
 
         df["datum"] = df["datum"].astype(str).str.strip()
         df["uur"]   = pd.to_numeric(df["uur"], errors="coerce")
