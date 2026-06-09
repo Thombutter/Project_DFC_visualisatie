@@ -204,7 +204,7 @@ def _zone_cache_key(df: pd.DataFrame) -> str:
         .to_csv(index=False)
         .encode("utf-8")
     )
-    return hashlib.md5(coords).hexdigest()
+    return "v2-" + hashlib.md5(coords).hexdigest()
 
 
 @st.cache_data(show_spinner="Zones classificeren (eenmalig)...")
@@ -221,15 +221,17 @@ def classify_zones_cached(cache_key: str, file_bytes: bytes | None) -> pd.DataFr
             pass
 
     enriched = enrich_with_zones(df)
-    # Tijdelijke debug-check
-    st.write("Unieke waarden VOOR fallback:", df_analyzed['classificatie'].unique())
 
-    try:
-        to_save = enriched.copy()
-        to_save["_cache_key"] = cache_key
-        to_save.to_parquet(ZONE_CACHE_FILE, index=False)
-    except Exception:
-        pass
+    # Alleen een geldig OSM-resultaat naar schijf cachen. Anders blijft een
+    # mislukte Overpass-call (terugval op "Onbekend") permanent in de cache
+    # hangen en wordt de classificatie nooit opnieuw geprobeerd.
+    if enriched.attrs.get("osm_ok", True):
+        try:
+            to_save = enriched.copy()
+            to_save["_cache_key"] = cache_key
+            to_save.to_parquet(ZONE_CACHE_FILE, index=False)
+        except Exception:
+            pass
 
     return enriched
 

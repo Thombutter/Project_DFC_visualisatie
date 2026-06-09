@@ -57,37 +57,28 @@ except Exception:  # pragma: no cover
 
 VOETPAD = "Voetpad"
 FIETSPAD = "Fietspad"
+WOONSTRAAT = "Woonstraat"
 HOOFDWEG = "Hoofdweg"
+ONBEKEND = "Onbekend"  # alleen gebruikt als OSM onbereikbaar is
 
-CATEGORIES = (VOETPAD, FIETSPAD, HOOFDWEG)
+CATEGORIES = (VOETPAD, FIETSPAD, WOONSTRAAT, HOOFDWEG)
 
 # OSM highway-tag  ->  onze categorie
 HIGHWAY_MAP = {
     # Voetpad
-    "footway": VOETPAD,
-    "pedestrian": VOETPAD,
-    "path": VOETPAD,
-    "steps": VOETPAD,
-    "living_street": VOETPAD,
-    "track": VOETPAD,
-    "bridleway": VOETPAD,
+    "footway": VOETPAD, "pedestrian": VOETPAD, "path": VOETPAD,
+    "steps": VOETPAD, "track": VOETPAD, "bridleway": VOETPAD,
     # Fietspad
     "cycleway": FIETSPAD,
-    # Hoofdweg
-    "motorway": HOOFDWEG,
-    "motorway_link": HOOFDWEG,
-    "trunk": HOOFDWEG,
-    "trunk_link": HOOFDWEG,
-    "primary": HOOFDWEG,
-    "primary_link": HOOFDWEG,
-    "secondary": HOOFDWEG,
-    "secondary_link": HOOFDWEG,
-    "tertiary": HOOFDWEG,
-    "tertiary_link": HOOFDWEG,
-    "unclassified": HOOFDWEG,
-    "residential": HOOFDWEG,
-    "service": HOOFDWEG,
-    "road": HOOFDWEG,
+    # Woonstraat (lokale straten met gemengd verkeer; GEEN doorgaande weg)
+    "living_street": WOONSTRAAT, "residential": WOONSTRAAT,
+    "service": WOONSTRAAT, "unclassified": WOONSTRAAT, "road": WOONSTRAAT,
+    # Hoofdweg (doorgaande wegen)
+    "motorway": HOOFDWEG, "motorway_link": HOOFDWEG,
+    "trunk": HOOFDWEG, "trunk_link": HOOFDWEG,
+    "primary": HOOFDWEG, "primary_link": HOOFDWEG,
+    "secondary": HOOFDWEG, "secondary_link": HOOFDWEG,
+    "tertiary": HOOFDWEG, "tertiary_link": HOOFDWEG,
 }
 
 # Een weg telt mee als hij binnen deze afstand (meter) van het punt ligt.
@@ -96,7 +87,11 @@ MAX_SNAP_M = 35.0
 OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 )
+
+# Laatste foutreden van de OSM-call, zodat de UI kan tonen WAAROM het faalde.
+_LAST_FETCH_ERROR: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -157,24 +152,37 @@ def _fetch_osm_ways(min_lat, min_lon, max_lat, max_lon):
 
     data = "data=" + urllib.parse.quote(query)
 
+    global _LAST_FETCH_ERROR
+    _LAST_FETCH_ERROR = None
+    errors: list[str] = []
+    payload = None
+
     for endpoint in OVERPASS_ENDPOINTS:
+        host = endpoint.split("/")[2]
         try:
             req = urllib.request.Request(
                 endpoint,
                 data=data.encode("utf-8"),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    # Overpass-mirrors weigeren regelmatig requests zonder UA.
+                    "User-Agent": "DFC-visualisatie/1.0 (HvA studieproject)",
+                },
             )
-            with urllib.request.urlopen(req, timeout=65) as resp:
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             break
-        except (urllib.error.URLError, TimeoutError, ValueError):
+        except Exception as exc:  # noqa: BLE001 - reden bewust tonen in UI
+            errors.append(f"{host}: {exc!r}")
             payload = None
             time.sleep(1)
             continue
     else:
+        _LAST_FETCH_ERROR = " | ".join(errors) or "alle endpoints faalden"
         return None
 
     if payload is None:
+        _LAST_FETCH_ERROR = " | ".join(errors) or "geen antwoord van Overpass"
         return None
 
     ways = []
@@ -189,7 +197,18 @@ def _fetch_osm_ways(min_lat, min_lon, max_lat, max_lon):
         pts = [(g["lat"], g["lon"]) for g in geom if "lat" in g]
         if len(pts) >= 2:
             ways.append((cat, pts))
-    return ways or None
+
+    if not ways:
+        # Call gelukt, maar nul bruikbare wegen: ander probleem dan een
+        # netwerkfout (bv. lege/foute bbox of query).
+        n = len(payload.get("elements", []))
+        _LAST_FETCH_ERROR = (
+            f"call gelukt maar 0 bruikbare wegen gevonden "
+            f"(Overpass gaf {n} elementen terug)"
+        )
+        return None
+
+    return ways
 
 
 # --------------------------------------------------------------------------- #
@@ -230,11 +249,11 @@ def _nearest_known_fallback(lats, lons, classes):
 def _geometric_fallback(df: pd.DataFrame) -> pd.Series:
     """Noodoplossing als OSM onbereikbaar is.
 
-    Zonder wegdata kan het type niet echt bepaald worden. We kennen dan
-    alle punten voorlopig "Hoofdweg" toe (neutrale, meest voorkomende
-    categorie) zodat de app blijft werken.
+    Zonder wegdata kan het type niet bepaald worden. We kennen alle punten
+    daarom "Onbekend" toe (i.p.v. een misleidend "Hoofdweg") zodat de kaart
+    eerlijk laat zien dat de classificatie ontbreekt. De app blijft werken.
     """
-    return pd.Series([HOOFDWEG] * len(df), index=df.index)
+    return pd.Series([ONBEKEND] * len(df), index=df.index)
 
 
 def enrich_with_zones(df: pd.DataFrame) -> pd.DataFrame:
@@ -273,6 +292,7 @@ def enrich_with_zones(df: pd.DataFrame) -> pd.DataFrame:
                 "controleer de netwerkinstellingen."
             )
         out["classificatie"] = _geometric_fallback(out).values
+        out.attrs["osm_ok"] = False  # niet cachen: bij herstart opnieuw proberen
         return out
 
     raw = []
@@ -287,6 +307,7 @@ def enrich_with_zones(df: pd.DataFrame) -> pd.DataFrame:
 
     filled = _nearest_known_fallback(lats, lons, raw)
     out["classificatie"] = filled
+    out.attrs["osm_ok"] = True  # geldig OSM-resultaat: mag gecached worden
     return out
 
 
@@ -322,6 +343,7 @@ def zone_summary_chart(df: pd.DataFrame, metric_col: str, metric_label: str):
         color_discrete_map={
             VOETPAD: "#2ca02c",
             FIETSPAD: "#1f77b4",
+            WOONSTRAAT: "#ff7f0e",
             HOOFDWEG: "#d62728",
         },
     )
