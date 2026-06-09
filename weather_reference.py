@@ -39,6 +39,8 @@ def load_reference_temp(dates: tuple | None = None) -> pd.DataFrame | None:
             timeout=20,
         )
         response.raise_for_status()
+        st.write("kolommen na inlezen:", df.columns.tolist())
+        st.write("eerste rij:", df.iloc[0].tolist())
     except Exception as e:
         st.warning(f"KNMI data kon niet worden opgehaald: {e}")
         return None
