@@ -252,7 +252,7 @@ uploaded = st.sidebar.file_uploader(
 file_bytes = uploaded.getvalue() if uploaded is not None else None
 
 df = load_data(file_bytes)
-st.write(df.columns.tolist())
+
 if df.empty:
     st.error("Geen geldige GPS-rijen gevonden in de data.")
     st.stop()
