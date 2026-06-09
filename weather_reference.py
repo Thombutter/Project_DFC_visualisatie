@@ -123,12 +123,94 @@ def add_reference_to_chart(fig, dff: pd.DataFrame, reference_temp: pd.DataFrame)
         go.Scatter(
             x=ref["timestamp"],
             y=ref["knmi_temp_C"],
-            mode="lines+markers",        # ← markers zodat hover werkt
-            marker=dict(size=6),
+            mode="lines",
             name="KNMI referentie (Schiphol)",
             line=dict(color="#1f77b4", dash="dash", width=1.5),
-            hovertemplate="%{x|%H:%M}<br>%{y:.1f} °C<extra>KNMI Schiphol</extra>",
         )
     )
-    fig.update_layout(hovermode="x unified")  # ← toont beide traces tegelijk
     return fig
+
+
+def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
+    """Toont een statische analyse van het stedelijk warmte-eiland effect.
+
+    Vergelijkt de gemeten temperatuur (per uur gemiddeld) met de KNMI
+    referentie en beantwoordt drie vragen:
+    1. Gemiddeld temperatuurverschil
+    2. Maximaal temperatuurverschil
+    3. Factoren die het verschil verklaren
+    """
+    if reference_temp is None or reference_temp.empty:
+        return
+
+    import streamlit as st
+
+    # Resample meting naar uurgemiddelden
+    meting_uur = (
+        dff.set_index("timestamp")["tempC"]
+        .resample("1h")
+        .mean()
+        .reset_index()
+        .rename(columns={"tempC": "meting_C"})
+    )
+
+    # Merge met KNMI op dichtstbijzijnde uur
+    ref = reference_temp.copy()
+    ref["timestamp"] = ref["timestamp"].dt.floor("h")
+    meting_uur["timestamp"] = meting_uur["timestamp"].dt.floor("h")
+
+    merged = meting_uur.merge(ref, on="timestamp", how="inner")
+    if merged.empty:
+        st.info("Geen overlappende uurdata tussen meting en KNMI referentie.")
+        return
+
+    merged["verschil"] = merged["meting_C"] - merged["knmi_temp_C"]
+
+    gem_verschil = merged["verschil"].mean()
+    max_verschil = merged["verschil"].max()
+    max_tijdstip = merged.loc[merged["verschil"].idxmax(), "timestamp"]
+    max_meting   = merged.loc[merged["verschil"].idxmax(), "meting_C"]
+    max_knmi     = merged.loc[merged["verschil"].idxmax(), "knmi_temp_C"]
+
+    st.subheader("Stedelijk warmte-eiland analyse")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Gemiddeld verschil",
+        f"+{gem_verschil:.1f} °C",
+        help="Gemiddelde van (jouw meting − KNMI Schiphol) per uur"
+    )
+    c2.metric(
+        "Maximaal verschil",
+        f"+{max_verschil:.1f} °C",
+        help=f"Hoogste verschil gemeten om {max_tijdstip.strftime('%H:%M')}"
+    )
+    c3.metric(
+        "Tijdstip maximum",
+        max_tijdstip.strftime("%H:%M"),
+        help=f"Meting: {max_meting:.1f} °C  |  KNMI: {max_knmi:.1f} °C"
+    )
+
+    st.markdown("**Waarom is het centrum warmer dan de buitenrand?**")
+    st.markdown("""
+- **Verharding en bebouwing** — steen, asfalt en beton absorberen overdag meer
+  zonne-energie dan gras of water en geven die 's middags als warmte af.
+  De Mauritskade–Nieuwmarkt route loopt van een relatief open
+  grachtzone naar een dicht bebouwd stedelijk kern.
+- **Verminderde verdamping** — weinig groen betekent weinig
+  verdampingskoeling. Bomen en water langs de Mauritskade koelen
+  de lucht meetbaar.
+- **Menselijke warmtebronnen** — verkeer, airconditioning en mensen
+  produceren extra warmte, geconcentreerd in het centrum.
+- **Windafscherming** — hoge gebouwen rond de Nieuwmarkt blokkeren
+  wind, waardoor opgewarmde lucht minder snel wordt afgevoerd.
+- **Meetpositie** — KNMI Schiphol meet op een open vliegveld zonder
+  bebouwing, wat de referentie structureel koeler maakt dan
+  welk stedelijk punt dan ook.
+""")
+
+    st.caption(
+        f"Gebaseerd op {len(merged)} uurgemiddelden · "
+        f"Meting: {merged['meting_C'].mean():.1f} °C gemiddeld · "
+        f"KNMI Schiphol: {merged['knmi_temp_C'].mean():.1f} °C gemiddeld"
+    )

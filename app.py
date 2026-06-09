@@ -515,9 +515,11 @@ fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
 # Open-Meteo referentielijn toevoegen als temperatuur geselecteerd is
 if metric_col == "tempC" and reference_temp is not None:
     fig = add_reference_to_chart(fig, dff, reference_temp)
-
+    
 st.plotly_chart(fig, use_container_width=True)
-
+if metric_col == "tempC":
+    from weather_reference import warmte_eiland_analyse
+    warmte_eiland_analyse(dff, reference_temp)
 with st.expander("Bekijk ruwe data"):
     cols = ["timestamp", "latitude", "longitude",
             "tempC", "co2_ppm", "humidity"]
