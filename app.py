@@ -221,6 +221,8 @@ def classify_zones_cached(cache_key: str, file_bytes: bytes | None) -> pd.DataFr
             pass
 
     enriched = enrich_with_zones(df)
+    # Tijdelijke debug-check
+    st.write("Unieke waarden VOOR fallback:", df_analyzed['classificatie'].unique())
 
     try:
         to_save = enriched.copy()
