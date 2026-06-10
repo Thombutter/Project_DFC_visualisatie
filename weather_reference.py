@@ -191,30 +191,3 @@ def warmte_eiland_analyse(dff: pd.DataFrame, reference_temp: pd.DataFrame):
         help=f"Meting: {max_meting:.1f} °C  |  KNMI: {max_knmi:.1f} °C"
     )
 
-    st.markdown("**Waarom is het centrum warmer dan de buitenrand?**")
-    st.markdown("""
-De route loopt van de **Mauritskade** langs **Artis** naar de **Nieuwmarkt** —
-een gradiënt van relatief open naar dicht bebouwd, die zichtbaar is in de
-temperatuurmeting:
-
-- **Mauritskade (startpunt)** — open ligging langs het Nieuwe Herengracht-water
-  en brede kade zorgen voor enige koeling door verdamping en wind. Dit is
-  het koelste deel van de route.
-- **Langs Artis** — het parkgroen en de bomen langs Artis dempen de opwarming
-  tijdelijk. Groen koelt via verdamping (evapotranspiratie) en schaduw.
-- **Nieuwmarkt (eindpunt)** — dichte bebouwing, weinig groen, veel toeristen
-  en horeca. Steen en asfalt slaan overdag warmte op en geven die af als
-  voelbare hitte. Wind wordt geblokkeerd door de smalle straatjes.
-- **Verharding** — het aandeel verharding neemt toe richting de Nieuwmarkt,
-  met minder verdampingskoeling als gevolg.
-- **Menselijke warmtebronnen** — verkeer, airconditioning en mensen leveren
-  extra warmte, geconcentreerd in het drukke centrum.
-- **KNMI-referentie** — Schiphol meet op een open vliegveld zonder bebouwing,
-  waardoor de referentie structureel koeler is dan elk stedelijk punt.
-""")
-
-    st.caption(
-        f"Gebaseerd op {len(merged)} uurgemiddelden · "
-        f"Meting: {merged['meting_C'].mean():.1f} °C gemiddeld · "
-        f"KNMI Schiphol: {merged['knmi_temp_C'].mean():.1f} °C gemiddeld"
-    )
