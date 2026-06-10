@@ -521,15 +521,6 @@ if metric_col == "tempC" and reference_temp is not None:
     fig = add_reference_to_chart(fig, dff, reference_temp)
     
 st.plotly_chart(fig, use_container_width=True)
-if metric_col == "tempC":
-    from weather_reference import warmte_eiland_analyse
-    warmte_eiland_analyse(dff, reference_temp)
-with st.expander("Bekijk ruwe data"):
-    cols = ["timestamp", "latitude", "longitude",
-            "tempC", "co2_ppm", "humidity"]
-    if zone_col is not None:
-        cols.insert(3, zone_col)
-    st.dataframe(dff[cols], use_container_width=True)
 
 st.subheader("Sensorwaarden per omgevingstype")
 zone_chart = zone_summary_chart(dff, metric_col, metric_label)
